@@ -83,15 +83,16 @@ strategies:
 
 services:
   algo-bot:
-    build: .
-    container_name: tradebot
-    restart: unless-stopped
+    image: algo-trader
     volumes:
-      - ./config:/app/config   # Allow editing settings without rebuild
+      # PERSIST THE DB (Critical)
+      - ./data:/app/data 
+      # CACHE YFINANCE (Efficiency)
+      - ./cache:/app/cache
+      # LOGS
       - ./logs:/app/logs
-      - ./yfinance.cache:/app/yfinance.cache
-    env_file:
-      - .env
+    environment:
+      - DB_PATH=/app/data/trading.db
 
 // Dockerfile
 ﻿# Use slim python image
@@ -471,63 +472,122 @@ class KrakenClient:
 // src/brokers/__init__.py
 
 
+// src/dashboard.py
+import streamlit as st
+import sqlite3
+import json
+import pandas as pd
+
+DB_PATH = "/app/data/trading.db"
+
+st.set_page_config(layout="wide")
+st.title("⚡ Algo Command Center")
+
+# --- 1. PERFORMANCE METRICS ---
+conn = sqlite3.connect(DB_PATH)
+df_trades = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC", conn)
+if not df_trades.empty:
+    success_rate = len(df_trades[df_trades['slippage'] > -0.1]) / len(df_trades) # Placeholder logic
+    avg_slippage = df_trades['slippage'].mean()
+    
+    col1, col2 = st.columns(2)
+    col1.metric("Success Rate", f"{success_rate:.1%}")
+    col2.metric("Avg Slippage", f"{avg_slippage:.2f}%")
+    st.dataframe(df_trades)
+
+# --- 2. STRATEGY MANAGEMENT ---
+st.header("⚙️ Active Strategies")
+df_strategies = pd.read_sql("SELECT * FROM strategies", conn)
+st.dataframe(df_strategies)
+
+# Add New Stock Form
+with st.form("add_stock"):
+    col1, col2, col3 = st.columns(3)
+    symbol = col1.text_input("Symbol (e.g. AAPL)")
+    strategy = col2.selectbox("Strategy", ["rsi_panic", "macd"])
+    
+    # JSON Params Editor
+    default_params = '{"threshold": 30, "qty": 1, "stop_loss": 0.02}'
+    params = col3.text_area("Parameters (JSON)", default_params)
+    
+    if st.form_submit_button("Deploy Bot"):
+        try:
+            # Validate JSON
+            json.loads(params) 
+            c = conn.cursor()
+            c.execute("INSERT OR REPLACE INTO strategies VALUES (?, ?, ?, 1)", 
+                      (symbol, strategy, params))
+            conn.commit()
+            st.success(f"Deployed {symbol}!")
+            st.experimental_rerun()
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+conn.close()
+
 // src/main.py
 ﻿import time
 import schedule
-import yaml
-import os
-from dotenv import load_dotenv
-from src.utils.logger import setup_logger
+import threading
+import json
+import sqlite3
 from src.brokers.alpaca_api import AlpacaClient
-from src.strategies.rsi_panic import check_signal
-from src.utils.database import init_db
+from src.utils.database import init_db, vacuum_db
 
-# Load Environment and Logging
-load_dotenv()
-logger = setup_logger("Main")
+job_lock = threading.Lock()
 
-CONFIG_PATH = "config/settings.yaml"
+def get_active_strategies():
+    """Reads configuration from DB instead of YAML"""
+    conn = sqlite3.connect("/app/data/trading.db")
+    c = conn.cursor()
+    c.execute("SELECT symbol, strategy_type, params FROM strategies WHERE is_active=1")
+    rows = c.fetchall()
+    conn.close()
+    
+    strategies = {}
+    for r in rows:
+        strategies[r[0]] = {
+            "type": r[1],
+            "params": json.loads(r[2])
+        }
+    return strategies
 
-def load_config():
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
+def job(broker):
+    # 1. Locking (Efficiency Proposal A)
+    if not job_lock.acquire(blocking=False):
+        print("Skipping cycle: Previous cycle still running.")
+        return
 
-def job():
     try:
-        config = load_config()
-        broker = AlpacaClient() # Re-init to ensure fresh connection/auth check
+        # 2. DB Maintenance (New Requirement)
+        vacuum_db() 
 
-        logger.info("--- Starting Analysis Cycle ---")
+        # 3. Dynamic Config
+        strategies = get_active_strategies()
         
-        strategies = config.get("strategies", {})
-        for symbol, settings in strategies.items():
-            if settings.get("enabled"):
-                check_signal(symbol, settings, broker)
-        
-        logger.info("--- Cycle Complete ---")
-
+        for symbol, config in strategies.items():
+            # 4. Strategy Dispatcher
+            if config['type'] == 'rsi_panic':
+                 # Pass specific params per stock
+                 check_signal(symbol, config['params'], broker)
+            elif config['type'] == 'macd_cross':
+                 check_macd(symbol, config['params'], broker)
+                 
     except Exception as e:
-        logger.error(f"Critical Error in Job Cycle: {e}")
+        print(f"Cycle Error: {e}")
+    finally:
+        job_lock.release()
 
 def main():
-    init_db()  # <--- Initialize DB on startup
-    logger.info("🤖 Algo Trading Bot Starting...")
-    logger.info(f"Mode: {os.getenv('TRADING_MODE', 'UNKNOWN')}")
+    init_db()
+    # 5. Singleton Client (Efficiency Proposal A)
+    broker = AlpacaClient() 
     
-    # Run once immediately on startup
-    job()
-
-    # Schedule subsequent runs
-    config = load_config()
-    interval = config['system']['update_interval_minutes']
-    schedule.every(interval).minutes.do(job)
-
+    schedule.every(1).minutes.do(job, broker=broker)
+    
     while True:
         schedule.run_pending()
         time.sleep(1)
-
-if __name__ == "__main__":
-    main()
 
 // src/strategies/rsi_panic.py
 ﻿import yfinance as yf
@@ -647,48 +707,63 @@ def check_signal(symbol, settings, broker):
 
 // src/utils/database.py
 ﻿import sqlite3
-import os
+import json
+import time
 from src.utils.logger import setup_logger
 
 logger = setup_logger("Database")
-DB_PATH = "trading.db"
+DB_PATH = "/app/data/trading.db" # Updated path for Docker volume
 
 def init_db():
-    """
-    Creates the trades table if it doesn't exist.
-    Called once at bot startup.
-    """
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS trades
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      symbol TEXT,
-                      side TEXT,
-                      qty REAL,
-                      price REAL,
-                      strategy TEXT)''')
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully.")
-    except Exception as e:
-        logger.critical(f"Database Initialization Failed: {e}")
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # 1. Configuration Table (The "Brain")
+    # Stores: symbol='TSLA', strategy='rsi_panic', params='{"threshold": 7, "qty": 5}', active=1
+    c.execute('''CREATE TABLE IF NOT EXISTS strategies
+                 (symbol TEXT PRIMARY KEY,
+                  strategy_type TEXT,
+                  params TEXT, 
+                  is_active INTEGER DEFAULT 1)''')
 
-def log_trade(symbol, side, qty, price, strategy="Unknown"):
+    # 2. Trades Table (Performance tracking)
+    # Added: entry_id (client_order_id), fill_price, slippage
+    c.execute('''CREATE TABLE IF NOT EXISTS trades
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  symbol TEXT,
+                  side TEXT,
+                  qty REAL,
+                  price_requested REAL,
+                  price_filled REAL,
+                  slippage REAL,
+                  strategy TEXT,
+                  client_order_id TEXT UNIQUE)''')
+
+    # 3. Market Cache (To save API calls)
+    c.execute('''CREATE TABLE IF NOT EXISTS market_cache
+                 (symbol TEXT,
+                  data_blob BLOB,
+                  updated_at REAL,
+                  PRIMARY KEY (symbol))''')
+
+    conn.commit()
+    conn.close()
+
+def vacuum_db(max_size_mb=500):
     """
-    Inserts a trade record into the local database.
+    Auto-cleaning logic: Removes old logs/cache if DB gets too big.
     """
-    try:
+    file_size = os.path.getsize(DB_PATH) / (1024 * 1024) # Size in MB
+    if file_size > (max_size_mb * 0.9): # 90% capacity warning
+        logger.warning(f"DB is large ({file_size:.2f}MB). Cleaning old data...")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("INSERT INTO trades (symbol, side, qty, price, strategy) VALUES (?, ?, ?, ?, ?)",
-                  (symbol, side, qty, price, strategy))
+        # Delete trades older than 90 days (optional) or just clear cache
+        c.execute("DELETE FROM market_cache") 
+        c.execute("VACUUM") # Compresses the DB file
         conn.commit()
         conn.close()
-        logger.info(f"Trade logged to DB: {side} {symbol} @ ${price}")
-    except Exception as e:
-        logger.error(f"Failed to log trade to DB: {e}")
 
 // src/utils/logger.py
 ﻿import logging
