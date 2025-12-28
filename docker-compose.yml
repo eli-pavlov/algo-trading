@@ -5,6 +5,8 @@ services:
     image: algo-trader
     container_name: tradebot
     restart: unless-stopped
+    env_file:
+      - .env
     volumes:
       - ./data:/app/data       # Shared DB
       - ./cache:/app/cache     # YFinance Cache
@@ -20,6 +22,8 @@ services:
     image: algo-trader
     container_name: trade_ui
     restart: unless-stopped
+    env_file:
+      - .env
     # Override default command to run Streamlit
     command: ["streamlit", "run", "src/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:

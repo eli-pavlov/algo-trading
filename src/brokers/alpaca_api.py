@@ -35,19 +35,34 @@ class AlpacaClient:
         except Exception:
             return None
 
-    def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price):
+    def has_open_order(self, symbol):
+        """Checks if there are any open orders for this symbol to prevent stacking"""
         try:
-            order = self.api.submit_order(
-                symbol=symbol,
-                qty=qty,
-                side=side,
-                type='market',
-                time_in_force='gtc',
-                order_class='bracket',
-                take_profit={'limit_price': take_profit_price},
-                stop_loss={'stop_price': stop_loss_price}
-            )
-            logger.info(f"Order Submitted: {side} {qty} {symbol}")
+            orders = self.api.list_orders(status='open', symbols=[symbol], limit=1)
+            return len(orders) > 0
+        except Exception as e:
+            logger.error(f"Error checking open orders: {e}")
+            return False
+
+    def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price, client_order_id=None):
+        try:
+            # Prepare arguments, filtering out None for client_order_id if not provided
+            params = {
+                "symbol": symbol,
+                "qty": qty,
+                "side": side,
+                "type": 'market',
+                "time_in_force": 'gtc',
+                "order_class": 'bracket',
+                "take_profit": {'limit_price': take_profit_price},
+                "stop_loss": {'stop_price': stop_loss_price}
+            }
+            
+            if client_order_id:
+                params["client_order_id"] = client_order_id
+
+            order = self.api.submit_order(**params)
+            logger.info(f"Order Submitted: {side} {qty} {symbol} (ID: {client_order_id})")
             return order
         except Exception as e:
             logger.error(f"Failed to submit order for {symbol}: {e}")
