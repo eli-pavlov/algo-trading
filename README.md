@@ -1,2 +1,2 @@
-# algo-trading
-algo-trading
+﻿# algo-trading
+Algorithmic Trading Bot Monorepo

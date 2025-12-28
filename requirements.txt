@@ -1,0 +1,13 @@
+﻿alpaca-trade-api
+krakenex
+pykrakenapi
+yfinance
+pandas
+numpy
+python-dotenv
+pyyaml
+requests
+requests-cache
+schedule
+pytest
+flake8
