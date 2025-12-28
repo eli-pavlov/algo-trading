@@ -1,13 +1,3 @@
-// .env.example
-﻿# Broker Keys
-ALPACA_API_KEY=your_key
-ALPACA_SECRET_KEY=your_secret
-ALPACA_BASE_URL=https://paper-api.alpaca.markets
-
-# System
-TRADING_MODE=PAPER
-LOG_LEVEL=INFO
-
 // .github/workflows/ci-checks.yml
 ﻿name: CI Checks
 
@@ -735,6 +725,57 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+// src/pinescript/rsi_original
+//@version=5
+strategy("Algo Pattern Sniper [Universal]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- 1. CONFIGURATION ---
+// These inputs allow you to tune the bot for different stocks without rewriting code
+emaLength = input.int(200, "Trend Filter (EMA)", minval=50)
+rsiLength = input.int(14, "RSI Length")
+rsiOverSold = input.int(30, "RSI Oversold Level")
+stopLossPct = input.float(2.0, "Stop Loss %") / 100
+takeProfitPct = input.float(4.0, "Take Profit %") / 100
+
+// --- 2. INDICATORS ---
+// Calculate moving averages and RSI
+ema200 = ta.ema(close, emaLength)
+rsi = ta.rsi(close, rsiLength)
+
+// --- 3. PATTERN RECOGNITION LOGIC ---
+// Define what a "Bullish Engulfing" candle looks like mathematically
+// Rule: Current Green candle body engulfs previous Red candle body
+isBullishEngulfing = open[1] > close[1] and close > open and close >= open[1] and open <= close[1]
+
+// Define a "Hammer" candle
+// Rule: Small body, long lower wick (2x body size)
+bodySize = math.abs(close - open)
+lowerWick = math.min(close, open) - low
+isHammer = lowerWick > (bodySize * 2) and (high - math.max(close, open)) < bodySize
+
+// --- 4. TRADING LOGIC (The "Algorithm") ---
+// LONG CONDITION:
+// 1. Price is ABOVE the 200 EMA (We only buy in uptrends - statistically safer)
+// 2. RSI is low (Price is "cheap") OR we see a strong pattern
+longCondition = (close > ema200) and (isBullishEngulfing or (isHammer and rsi < 50))
+
+// EXIT CONDITION:
+// We use a fixed Stop Loss and Take Profit calculated from entry price
+longStopPrice  = strategy.position_avg_price * (1 - stopLossPct)
+longTakeProfit = strategy.position_avg_price * (1 + takeProfitPct)
+
+// --- 5. EXECUTION ---
+if (longCondition)
+    strategy.entry("Long", strategy.long, comment="Pattern Detected")
+
+if (strategy.position_size > 0)
+    strategy.exit("Exit Long", "Long", stop=longStopPrice, limit=longTakeProfit)
+
+// --- 6. VISUALIZATION ---
+// Plot the EMA and color the background when a trade is active
+plot(ema200, color=color.blue, title="200 EMA")
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : na)
 
 // src/strategies/rsi_panic.py
 ﻿import yfinance as yf
