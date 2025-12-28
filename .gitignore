@@ -13,6 +13,7 @@ venv/
 logs/
 *.db
 *.sqlite
+cache/
 
 # IDE
 .vscode/

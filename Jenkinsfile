@@ -26,6 +26,7 @@
                             -e ALPACA_BASE_URL="https://paper-api.alpaca.markets" \
                             -e TRADING_MODE="PAPER" \
                             -e DB_PATH="/app/data/trading.db" \
+                            -e YF_CACHE_PATH="/app/cache/yfinance" \
                             -v $PWD/config:/app/config \
                             -v $PWD/data:/app/data \
                             -v $PWD/cache:/app/cache \
@@ -50,6 +51,7 @@
                             -e ALPACA_BASE_URL="https://api.alpaca.markets" \
                             -e TRADING_MODE="LIVE" \
                             -e DB_PATH="/app/data/trading.db" \
+                            -e YF_CACHE_PATH="/app/cache/yfinance" \
                             -v $PWD/config:/app/config \
                             -v $PWD/data:/app/data \
                             -v $PWD/cache:/app/cache \

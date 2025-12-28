@@ -39,7 +39,8 @@ class AlpacaClient:
         """Checks if there are any open orders for this symbol"""
         try:
             # Fetch generic list and filter client-side for absolute correctness
-            orders = self.api.list_orders(status='open', limit=100)
+            # Limit increased to 500 to catch more potential open orders
+            orders = self.api.list_orders(status='open', limit=500)
             return any(o.symbol == symbol for o in orders)
         except Exception as e:
             logger.error(f"Error checking open orders: {e}")

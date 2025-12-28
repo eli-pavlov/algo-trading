@@ -13,7 +13,11 @@ logger = setup_logger("RSI_Strategy")
 # Fix: Use environment variable for cache path to support CI/Local/Docker
 # Fallback to local './cache' if not running in Docker
 CACHE_PATH = os.getenv("YF_CACHE_PATH", "./cache/yfinance")
-os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+
+# Guard: Ensure directory exists, but handle case where path is just a filename
+cache_dir = os.path.dirname(CACHE_PATH)
+if cache_dir:
+    os.makedirs(cache_dir, exist_ok=True)
 
 session = CachedSession(CACHE_PATH, expire_after=timedelta(hours=1))
 
@@ -32,6 +36,7 @@ def check_signal(symbol, settings, broker):
     
     try:
         df = yf.download(symbol, period='30d', interval='1h', progress=False, session=session)
+        
         if df.empty:
             logger.warning(f"No data fetched for {symbol}")
             return
