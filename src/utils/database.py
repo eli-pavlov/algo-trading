@@ -1,43 +1,58 @@
 ﻿import sqlite3
-import os
+import json
+import time
 from src.utils.logger import setup_logger
 
 logger = setup_logger("Database")
-DB_PATH = "trading.db"
+DB_PATH = "/app/data/trading.db" # Updated path for Docker volume
 
 def init_db():
-    """
-    Creates the trades table if it doesn't exist.
-    Called once at bot startup.
-    """
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS trades
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                      symbol TEXT,
-                      side TEXT,
-                      qty REAL,
-                      price REAL,
-                      strategy TEXT)''')
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully.")
-    except Exception as e:
-        logger.critical(f"Database Initialization Failed: {e}")
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # 1. Configuration Table (The "Brain")
+    # Stores: symbol='TSLA', strategy='rsi_panic', params='{"threshold": 7, "qty": 5}', active=1
+    c.execute('''CREATE TABLE IF NOT EXISTS strategies
+                 (symbol TEXT PRIMARY KEY,
+                  strategy_type TEXT,
+                  params TEXT, 
+                  is_active INTEGER DEFAULT 1)''')
 
-def log_trade(symbol, side, qty, price, strategy="Unknown"):
+    # 2. Trades Table (Performance tracking)
+    # Added: entry_id (client_order_id), fill_price, slippage
+    c.execute('''CREATE TABLE IF NOT EXISTS trades
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  symbol TEXT,
+                  side TEXT,
+                  qty REAL,
+                  price_requested REAL,
+                  price_filled REAL,
+                  slippage REAL,
+                  strategy TEXT,
+                  client_order_id TEXT UNIQUE)''')
+
+    # 3. Market Cache (To save API calls)
+    c.execute('''CREATE TABLE IF NOT EXISTS market_cache
+                 (symbol TEXT,
+                  data_blob BLOB,
+                  updated_at REAL,
+                  PRIMARY KEY (symbol))''')
+
+    conn.commit()
+    conn.close()
+
+def vacuum_db(max_size_mb=500):
     """
-    Inserts a trade record into the local database.
+    Auto-cleaning logic: Removes old logs/cache if DB gets too big.
     """
-    try:
+    file_size = os.path.getsize(DB_PATH) / (1024 * 1024) # Size in MB
+    if file_size > (max_size_mb * 0.9): # 90% capacity warning
+        logger.warning(f"DB is large ({file_size:.2f}MB). Cleaning old data...")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("INSERT INTO trades (symbol, side, qty, price, strategy) VALUES (?, ?, ?, ?, ?)",
-                  (symbol, side, qty, price, strategy))
+        # Delete trades older than 90 days (optional) or just clear cache
+        c.execute("DELETE FROM market_cache") 
+        c.execute("VACUUM") # Compresses the DB file
         conn.commit()
         conn.close()
-        logger.info(f"Trade logged to DB: {side} {symbol} @ ${price}")
-    except Exception as e:
-        logger.error(f"Failed to log trade to DB: {e}")

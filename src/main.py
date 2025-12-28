@@ -1,56 +1,62 @@
 ﻿import time
 import schedule
-import yaml
-import os
-from dotenv import load_dotenv
-from src.utils.logger import setup_logger
+import threading
+import json
+import sqlite3
 from src.brokers.alpaca_api import AlpacaClient
-from src.strategies.rsi_panic import check_signal
-from src.utils.database import init_db
+from src.utils.database import init_db, vacuum_db
 
-# Load Environment and Logging
-load_dotenv()
-logger = setup_logger("Main")
+job_lock = threading.Lock()
 
-CONFIG_PATH = "config/settings.yaml"
+def get_active_strategies():
+    """Reads configuration from DB instead of YAML"""
+    conn = sqlite3.connect("/app/data/trading.db")
+    c = conn.cursor()
+    c.execute("SELECT symbol, strategy_type, params FROM strategies WHERE is_active=1")
+    rows = c.fetchall()
+    conn.close()
+    
+    strategies = {}
+    for r in rows:
+        strategies[r[0]] = {
+            "type": r[1],
+            "params": json.loads(r[2])
+        }
+    return strategies
 
-def load_config():
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
+def job(broker):
+    # 1. Locking (Efficiency Proposal A)
+    if not job_lock.acquire(blocking=False):
+        print("Skipping cycle: Previous cycle still running.")
+        return
 
-def job():
     try:
-        config = load_config()
-        broker = AlpacaClient() # Re-init to ensure fresh connection/auth check
+        # 2. DB Maintenance (New Requirement)
+        vacuum_db() 
 
-        logger.info("--- Starting Analysis Cycle ---")
+        # 3. Dynamic Config
+        strategies = get_active_strategies()
         
-        strategies = config.get("strategies", {})
-        for symbol, settings in strategies.items():
-            if settings.get("enabled"):
-                check_signal(symbol, settings, broker)
-        
-        logger.info("--- Cycle Complete ---")
-
+        for symbol, config in strategies.items():
+            # 4. Strategy Dispatcher
+            if config['type'] == 'rsi_panic':
+                 # Pass specific params per stock
+                 check_signal(symbol, config['params'], broker)
+            elif config['type'] == 'macd_cross':
+                 check_macd(symbol, config['params'], broker)
+                 
     except Exception as e:
-        logger.error(f"Critical Error in Job Cycle: {e}")
+        print(f"Cycle Error: {e}")
+    finally:
+        job_lock.release()
 
 def main():
-    init_db()  # <--- Initialize DB on startup
-    logger.info("🤖 Algo Trading Bot Starting...")
-    logger.info(f"Mode: {os.getenv('TRADING_MODE', 'UNKNOWN')}")
+    init_db()
+    # 5. Singleton Client (Efficiency Proposal A)
+    broker = AlpacaClient() 
     
-    # Run once immediately on startup
-    job()
-
-    # Schedule subsequent runs
-    config = load_config()
-    interval = config['system']['update_interval_minutes']
-    schedule.every(interval).minutes.do(job)
-
+    schedule.every(1).minutes.do(job, broker=broker)
+    
     while True:
         schedule.run_pending()
         time.sleep(1)
-
-if __name__ == "__main__":
-    main()

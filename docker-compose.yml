@@ -2,12 +2,13 @@
 
 services:
   algo-bot:
-    build: .
-    container_name: tradebot
-    restart: unless-stopped
+    image: algo-trader
     volumes:
-      - ./config:/app/config   # Allow editing settings without rebuild
+      # PERSIST THE DB (Critical)
+      - ./data:/app/data 
+      # CACHE YFINANCE (Efficiency)
+      - ./cache:/app/cache
+      # LOGS
       - ./logs:/app/logs
-      - ./yfinance.cache:/app/yfinance.cache
-    env_file:
-      - .env
+    environment:
+      - DB_PATH=/app/data/trading.db
