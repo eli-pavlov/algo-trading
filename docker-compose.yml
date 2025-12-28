@@ -15,8 +15,8 @@ services:
       - ./config:/app/config   # Config for seeding
     environment:
       - DB_PATH=/app/data/trading.db
+      - YF_CACHE_PATH=/app/cache/yfinance  # Explicit Cache Path
       - TRADING_MODE=PAPER
-    # Keeps the container running if the python script exits unexpectedly (optional safety)
     command: ["python", "-m", "src.main"]
 
   dashboard:
@@ -26,12 +26,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # Override default command to run Streamlit
     command: ["streamlit", "run", "src/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data       # Must share same volume as bot
+      - ./data:/app/data
       - ./logs:/app/logs
     environment:
       - DB_PATH=/app/data/trading.db

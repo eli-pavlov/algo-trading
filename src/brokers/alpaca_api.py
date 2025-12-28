@@ -36,17 +36,17 @@ class AlpacaClient:
             return None
 
     def has_open_order(self, symbol):
-        """Checks if there are any open orders for this symbol to prevent stacking"""
+        """Checks if there are any open orders for this symbol"""
         try:
-            orders = self.api.list_orders(status='open', symbols=[symbol], limit=1)
-            return len(orders) > 0
+            # Fetch generic list and filter client-side for absolute correctness
+            orders = self.api.list_orders(status='open', limit=100)
+            return any(o.symbol == symbol for o in orders)
         except Exception as e:
             logger.error(f"Error checking open orders: {e}")
             return False
 
     def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price, client_order_id=None):
         try:
-            # Prepare arguments, filtering out None for client_order_id if not provided
             params = {
                 "symbol": symbol,
                 "qty": qty,

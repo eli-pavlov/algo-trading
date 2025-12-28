@@ -9,8 +9,7 @@ TRADING_MODE=PAPER
 LOG_LEVEL=INFO
 
 // .github/workflows/ci-checks.yml
-﻿
-name: CI Checks
+﻿name: CI Checks
 
 on: [push, pull_request]
 
@@ -31,6 +30,9 @@ jobs:
         run: |
           # Stop build if syntax errors or undefined names
           flake8 src --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Run Tests
+        run: |
+          pytest -q
 
 // .gitignore
 ﻿# Python artifacts
@@ -72,6 +74,7 @@ strategies:
 
 services:
   algo-bot:
+    build: .
     image: algo-trader
     container_name: tradebot
     restart: unless-stopped
@@ -89,6 +92,7 @@ services:
     command: ["python", "-m", "src.main"]
 
   dashboard:
+    build: .
     image: algo-trader
     container_name: trade_ui
     restart: unless-stopped
@@ -148,7 +152,11 @@ CMD ["python", "-m", "src.main"]
                             -e ALPACA_SECRET_KEY=$SECRET \
                             -e ALPACA_BASE_URL="https://paper-api.alpaca.markets" \
                             -e TRADING_MODE="PAPER" \
+                            -e DB_PATH="/app/data/trading.db" \
                             -v $PWD/config:/app/config \
+                            -v $PWD/data:/app/data \
+                            -v $PWD/cache:/app/cache \
+                            -v $PWD/logs:/app/logs \
                             ${DOCKER_IMAGE}:${BRANCH_NAME}
                     '''
                 }
@@ -168,7 +176,11 @@ CMD ["python", "-m", "src.main"]
                             -e ALPACA_SECRET_KEY=$SECRET \
                             -e ALPACA_BASE_URL="https://api.alpaca.markets" \
                             -e TRADING_MODE="LIVE" \
+                            -e DB_PATH="/app/data/trading.db" \
                             -v $PWD/config:/app/config \
+                            -v $PWD/data:/app/data \
+                            -v $PWD/cache:/app/cache \
+                            -v $PWD/logs:/app/logs \
                             ${DOCKER_IMAGE}:${BRANCH_NAME}
                     '''
                 }
@@ -505,15 +517,24 @@ if not os.path.exists(DB_PATH):
     st.error(f"Database not found at {DB_PATH}. Wait for bot to initialize it.")
     st.stop()
 
-conn = sqlite3.connect(DB_PATH)
+# Use check_same_thread=False for Streamlit concurrency
+conn = sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
+conn.execute("PRAGMA busy_timeout=5000;")
 
 # --- 1. PERFORMANCE METRICS ---
 st.header("📈 Performance")
 try:
-    df_trades = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC LIMIT 100", conn)
+    # Use COALESCE to fallback to requested price if fill isn't recorded yet
+    query = """
+        SELECT *, 
+               COALESCE(price_filled, price_requested) as price 
+        FROM trades 
+        ORDER BY timestamp DESC LIMIT 100
+    """
+    df_trades = pd.read_sql(query, conn)
+    
     if not df_trades.empty:
         total_trades = len(df_trades)
-        # Simple placeholder metrics
         last_trade = df_trades.iloc[0]
         
         col1, col2, col3 = st.columns(3)
@@ -560,8 +581,15 @@ with st.form("add_stock"):
                 # Validate JSON
                 parsed_params = json.loads(params) 
                 c = conn.cursor()
-                c.execute("INSERT OR REPLACE INTO strategies VALUES (?, ?, ?, 1)", 
-                          (symbol, strategy, json.dumps(parsed_params)))
+                # Upsert logic
+                c.execute("""
+                    INSERT INTO strategies(symbol, strategy_type, params, is_active)
+                    VALUES (?, ?, ?, 1)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                      strategy_type=excluded.strategy_type,
+                      params=excluded.params,
+                      is_active=1
+                """, (symbol, strategy, json.dumps(parsed_params)))
                 conn.commit()
                 st.success(f"Deployed {symbol} successfully!")
                 st.rerun()
@@ -690,6 +718,9 @@ def main():
     except Exception as e:
         print(f"CRITICAL: Could not connect to Broker: {e}")
         return
+
+    # Run once immediately on startup
+    job(broker)
 
     schedule.every(1).minutes.do(job, broker=broker)
     
@@ -821,11 +852,16 @@ DB_PATH = os.getenv("DB_PATH", "/app/data/trading.db")
 
 def _connect():
     """Creates a connection with optimal settings for concurrency"""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=10) # Higher timeout for safety
+    # Safe guard: only create dir if path has a directory component
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+        
+    conn = sqlite3.connect(DB_PATH, timeout=15) # Increased timeout
     # Enable WAL mode for concurrency (Dashboard reading while Bot writes)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;") # Wait 5s if locked
     return conn
 
 def init_db():
@@ -877,8 +913,8 @@ def vacuum_db(max_size_mb=500):
             conn = _connect()
             c = conn.cursor()
             c.execute("DELETE FROM market_cache") 
-            c.execute("VACUUM") 
-            conn.commit()
+            conn.commit() # Commit delete BEFORE vacuum
+            conn.execute("VACUUM") 
             conn.close()
     except Exception as e:
         logger.error(f"Vacuum Failed: {e}")
@@ -887,8 +923,9 @@ def log_trade(symbol, side, qty, price, strategy="Unknown", client_order_id=None
     try:
         conn = _connect()
         c = conn.cursor()
+        # Log to price_requested, leave price_filled NULL (until we confirm fill)
         c.execute("""INSERT INTO trades 
-                     (symbol, side, qty, price_filled, strategy, client_order_id) 
+                     (symbol, side, qty, price_requested, strategy, client_order_id) 
                      VALUES (?, ?, ?, ?, ?, ?)""",
                   (symbol, side, qty, price, strategy, client_order_id))
         conn.commit()

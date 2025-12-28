@@ -14,8 +14,9 @@ DB_PATH = os.getenv("DB_PATH", "/app/data/trading.db")
 
 def get_active_strategies():
     try:
-        # Use context manager for auto-close
-        with sqlite3.connect(DB_PATH) as conn:
+        # Improved connection logic for reading
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            conn.execute("PRAGMA busy_timeout=5000;") # Wait 5s if locked
             c = conn.cursor()
             c.execute("SELECT symbol, strategy_type, params FROM strategies WHERE is_active=1")
             rows = c.fetchall()
@@ -34,17 +35,14 @@ def get_active_strategies():
 def seed_db_from_yaml():
     try:
         if not os.path.exists(DB_PATH):
-             # Let init_db handle creation first
              return
 
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
             c = conn.cursor()
-            # Check if strategies table exists
             c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='strategies'")
             if c.fetchone()[0] == 0: 
                 return 
 
-            # Check if empty
             c.execute("SELECT count(*) FROM strategies")
             if c.fetchone()[0] == 0:
                 print("⚡ DB is empty. Seeding from config/settings.yaml...")
@@ -63,8 +61,12 @@ def seed_db_from_yaml():
                                 "stop_loss_pct": settings.get('stop_loss_pct', 0.02),
                                 "timeframe": settings.get('timeframe', '2h')
                             }
-                            c.execute("INSERT INTO strategies VALUES (?, ?, ?, 1)", 
-                                      (symbol, 'rsi_panic', json.dumps(params)))
+                            # Explicit columns for safety
+                            c.execute("""
+                                INSERT INTO strategies (symbol, strategy_type, params, is_active) 
+                                VALUES (?, ?, ?, 1)
+                            """, (symbol, 'rsi_panic', json.dumps(params)))
+                    conn.commit()
                     print("✅ Seeding complete.")
                 else:
                     print("⚠️ Config file not found for seeding.")
@@ -104,7 +106,7 @@ def main():
         print(f"CRITICAL: Could not connect to Broker: {e}")
         return
 
-    # Run once immediately on startup
+    # Run once immediately
     job(broker)
 
     schedule.every(1).minutes.do(job, broker=broker)
