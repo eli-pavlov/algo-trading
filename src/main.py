@@ -104,6 +104,9 @@ def main():
         print(f"CRITICAL: Could not connect to Broker: {e}")
         return
 
+    # Run once immediately on startup
+    job(broker)
+
     schedule.every(1).minutes.do(job, broker=broker)
     
     while True:

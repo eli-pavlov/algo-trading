@@ -25,7 +25,11 @@
                             -e ALPACA_SECRET_KEY=$SECRET \
                             -e ALPACA_BASE_URL="https://paper-api.alpaca.markets" \
                             -e TRADING_MODE="PAPER" \
+                            -e DB_PATH="/app/data/trading.db" \
                             -v $PWD/config:/app/config \
+                            -v $PWD/data:/app/data \
+                            -v $PWD/cache:/app/cache \
+                            -v $PWD/logs:/app/logs \
                             ${DOCKER_IMAGE}:${BRANCH_NAME}
                     '''
                 }
@@ -45,7 +49,11 @@
                             -e ALPACA_SECRET_KEY=$SECRET \
                             -e ALPACA_BASE_URL="https://api.alpaca.markets" \
                             -e TRADING_MODE="LIVE" \
+                            -e DB_PATH="/app/data/trading.db" \
                             -v $PWD/config:/app/config \
+                            -v $PWD/data:/app/data \
+                            -v $PWD/cache:/app/cache \
+                            -v $PWD/logs:/app/logs \
                             ${DOCKER_IMAGE}:${BRANCH_NAME}
                     '''
                 }

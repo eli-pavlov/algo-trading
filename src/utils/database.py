@@ -9,11 +9,16 @@ DB_PATH = os.getenv("DB_PATH", "/app/data/trading.db")
 
 def _connect():
     """Creates a connection with optimal settings for concurrency"""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=10) # Higher timeout for safety
+    # Safe guard: only create dir if path has a directory component
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+        
+    conn = sqlite3.connect(DB_PATH, timeout=15) # Increased timeout
     # Enable WAL mode for concurrency (Dashboard reading while Bot writes)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;") # Wait 5s if locked
     return conn
 
 def init_db():
@@ -65,8 +70,8 @@ def vacuum_db(max_size_mb=500):
             conn = _connect()
             c = conn.cursor()
             c.execute("DELETE FROM market_cache") 
-            c.execute("VACUUM") 
-            conn.commit()
+            conn.commit() # Commit delete BEFORE vacuum
+            conn.execute("VACUUM") 
             conn.close()
     except Exception as e:
         logger.error(f"Vacuum Failed: {e}")
@@ -75,8 +80,9 @@ def log_trade(symbol, side, qty, price, strategy="Unknown", client_order_id=None
     try:
         conn = _connect()
         c = conn.cursor()
+        # Log to price_requested, leave price_filled NULL (until we confirm fill)
         c.execute("""INSERT INTO trades 
-                     (symbol, side, qty, price_filled, strategy, client_order_id) 
+                     (symbol, side, qty, price_requested, strategy, client_order_id) 
                      VALUES (?, ?, ?, ?, ?, ?)""",
                   (symbol, side, qty, price, strategy, client_order_id))
         conn.commit()

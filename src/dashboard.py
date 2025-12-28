@@ -13,15 +13,24 @@ if not os.path.exists(DB_PATH):
     st.error(f"Database not found at {DB_PATH}. Wait for bot to initialize it.")
     st.stop()
 
-conn = sqlite3.connect(DB_PATH)
+# Use check_same_thread=False for Streamlit concurrency
+conn = sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
+conn.execute("PRAGMA busy_timeout=5000;")
 
 # --- 1. PERFORMANCE METRICS ---
 st.header("📈 Performance")
 try:
-    df_trades = pd.read_sql("SELECT * FROM trades ORDER BY timestamp DESC LIMIT 100", conn)
+    # Use COALESCE to fallback to requested price if fill isn't recorded yet
+    query = """
+        SELECT *, 
+               COALESCE(price_filled, price_requested) as price 
+        FROM trades 
+        ORDER BY timestamp DESC LIMIT 100
+    """
+    df_trades = pd.read_sql(query, conn)
+    
     if not df_trades.empty:
         total_trades = len(df_trades)
-        # Simple placeholder metrics
         last_trade = df_trades.iloc[0]
         
         col1, col2, col3 = st.columns(3)
@@ -68,8 +77,15 @@ with st.form("add_stock"):
                 # Validate JSON
                 parsed_params = json.loads(params) 
                 c = conn.cursor()
-                c.execute("INSERT OR REPLACE INTO strategies VALUES (?, ?, ?, 1)", 
-                          (symbol, strategy, json.dumps(parsed_params)))
+                # Upsert logic
+                c.execute("""
+                    INSERT INTO strategies(symbol, strategy_type, params, is_active)
+                    VALUES (?, ?, ?, 1)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                      strategy_type=excluded.strategy_type,
+                      params=excluded.params,
+                      is_active=1
+                """, (symbol, strategy, json.dumps(parsed_params)))
                 conn.commit()
                 st.success(f"Deployed {symbol} successfully!")
                 st.rerun()

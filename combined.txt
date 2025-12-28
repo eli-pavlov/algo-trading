@@ -75,6 +75,8 @@ services:
     image: algo-trader
     container_name: tradebot
     restart: unless-stopped
+    env_file:
+      - .env
     volumes:
       - ./data:/app/data       # Shared DB
       - ./cache:/app/cache     # YFinance Cache
@@ -90,6 +92,8 @@ services:
     image: algo-trader
     container_name: trade_ui
     restart: unless-stopped
+    env_file:
+      - .env
     # Override default command to run Streamlit
     command: ["streamlit", "run", "src/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
@@ -437,19 +441,34 @@ class AlpacaClient:
         except Exception:
             return None
 
-    def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price):
+    def has_open_order(self, symbol):
+        """Checks if there are any open orders for this symbol to prevent stacking"""
         try:
-            order = self.api.submit_order(
-                symbol=symbol,
-                qty=qty,
-                side=side,
-                type='market',
-                time_in_force='gtc',
-                order_class='bracket',
-                take_profit={'limit_price': take_profit_price},
-                stop_loss={'stop_price': stop_loss_price}
-            )
-            logger.info(f"Order Submitted: {side} {qty} {symbol}")
+            orders = self.api.list_orders(status='open', symbols=[symbol], limit=1)
+            return len(orders) > 0
+        except Exception as e:
+            logger.error(f"Error checking open orders: {e}")
+            return False
+
+    def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price, client_order_id=None):
+        try:
+            # Prepare arguments, filtering out None for client_order_id if not provided
+            params = {
+                "symbol": symbol,
+                "qty": qty,
+                "side": side,
+                "type": 'market',
+                "time_in_force": 'gtc',
+                "order_class": 'bracket',
+                "take_profit": {'limit_price': take_profit_price},
+                "stop_loss": {'stop_price': stop_loss_price}
+            }
+            
+            if client_order_id:
+                params["client_order_id"] = client_order_id
+
+            order = self.api.submit_order(**params)
+            logger.info(f"Order Submitted: {side} {qty} {symbol} (ID: {client_order_id})")
             return order
         except Exception as e:
             logger.error(f"Failed to submit order for {symbol}: {e}")
@@ -581,13 +600,12 @@ job_lock = threading.Lock()
 DB_PATH = os.getenv("DB_PATH", "/app/data/trading.db")
 
 def get_active_strategies():
-    """Reads configuration from DB instead of YAML"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT symbol, strategy_type, params FROM strategies WHERE is_active=1")
-        rows = c.fetchall()
-        conn.close()
+        # Use context manager for auto-close
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT symbol, strategy_type, params FROM strategies WHERE is_active=1")
+            rows = c.fetchall()
         
         strategies = {}
         for r in rows:
@@ -601,66 +619,60 @@ def get_active_strategies():
         return {}
 
 def seed_db_from_yaml():
-    """Populates DB from settings.yaml if DB is empty"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        # Check if table exists and is empty
-        c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='strategies'")
-        if c.fetchone()[0] == 0:
-            # Init DB will create tables, but let's be safe and poll strategy count
-            return 
+        if not os.path.exists(DB_PATH):
+             # Let init_db handle creation first
+             return
 
-        c.execute("SELECT count(*) FROM strategies")
-        if c.fetchone()[0] == 0:
-            print("⚡ DB is empty. Seeding from config/settings.yaml...")
-            config_path = "/app/config/settings.yaml"
-            if os.path.exists(config_path):
-                with open(config_path, "r") as f:
-                    config = yaml.safe_load(f)
-                
-                for symbol, settings in config.get('strategies', {}).items():
-                    if settings.get('enabled'):
-                        # Convert yaml settings to the JSON params format expected by DB
-                        params = {
-                            "rsi_length": settings.get('rsi_length', 14),
-                            "rsi_panic_threshold": settings.get('rsi_panic_threshold', 30),
-                            "qty": settings.get('qty', 1),
-                            "take_profit_pct": settings.get('take_profit_pct', 0.05),
-                            "stop_loss_pct": settings.get('stop_loss_pct', 0.02),
-                            "timeframe": settings.get('timeframe', '2h')
-                        }
-                        c.execute("INSERT INTO strategies VALUES (?, ?, ?, 1)", 
-                                  (symbol, 'rsi_panic', json.dumps(params)))
-                conn.commit()
-                print("✅ Seeding complete.")
-            else:
-                print("⚠️ Config file not found for seeding.")
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            # Check if strategies table exists
+            c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='strategies'")
+            if c.fetchone()[0] == 0: 
+                return 
+
+            # Check if empty
+            c.execute("SELECT count(*) FROM strategies")
+            if c.fetchone()[0] == 0:
+                print("⚡ DB is empty. Seeding from config/settings.yaml...")
+                config_path = "/app/config/settings.yaml"
+                if os.path.exists(config_path):
+                    with open(config_path, "r") as f:
+                        config = yaml.safe_load(f)
+                    
+                    for symbol, settings in config.get('strategies', {}).items():
+                        if settings.get('enabled'):
+                            params = {
+                                "rsi_length": settings.get('rsi_length', 14),
+                                "rsi_panic_threshold": settings.get('rsi_panic_threshold', 30),
+                                "qty": settings.get('qty', 1),
+                                "take_profit_pct": settings.get('take_profit_pct', 0.05),
+                                "stop_loss_pct": settings.get('stop_loss_pct', 0.02),
+                                "timeframe": settings.get('timeframe', '2h')
+                            }
+                            c.execute("INSERT INTO strategies VALUES (?, ?, ?, 1)", 
+                                      (symbol, 'rsi_panic', json.dumps(params)))
+                    print("✅ Seeding complete.")
+                else:
+                    print("⚠️ Config file not found for seeding.")
     except Exception as e:
         print(f"Seeding Error: {e}")
 
 def job(broker):
-    # 1. Locking (Efficiency)
     if not job_lock.acquire(blocking=False):
         print("Skipping cycle: Previous cycle still running.")
         return
 
     try:
-        # 2. DB Maintenance
         vacuum_db() 
-
-        # 3. Dynamic Config
         strategies = get_active_strategies()
         
         if not strategies:
             print("No active strategies found in DB.")
 
         for symbol, config in strategies.items():
-            # 4. Strategy Dispatcher
             if config['type'] == 'rsi_panic':
                  check_signal(symbol, config['params'], broker)
-            # Add other strategies here (e.g. macd)
                  
     except Exception as e:
         print(f"Cycle Error: {e}")
@@ -670,21 +682,17 @@ def job(broker):
 def main():
     print("🤖 Algo Trading Bot Starting...")
     
-    # Initialize Infrastructure
     init_db()
     seed_db_from_yaml()
     
-    # Singleton Client
     try:
         broker = AlpacaClient()
     except Exception as e:
         print(f"CRITICAL: Could not connect to Broker: {e}")
         return
 
-    # Schedule Jobs
     schedule.every(1).minutes.do(job, broker=broker)
     
-    # Run loop
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -695,6 +703,7 @@ if __name__ == "__main__":
 // src/strategies/rsi_panic.py
 ﻿import yfinance as yf
 import pandas as pd
+import hashlib
 from requests_cache import CachedSession
 from datetime import timedelta
 from src.utils.logger import setup_logger
@@ -704,33 +713,22 @@ from src.utils.database import log_trade
 logger = setup_logger("RSI_Strategy")
 
 # Cache Yahoo data to prevent rate limits
-# Using /app/cache to map to docker volume
 session = CachedSession('/app/cache/yfinance', expire_after=timedelta(hours=1))
 
 def calculate_rsi(series, period=14):
-    """
-    Native RSI calculation (Wilder's Smoothing).
-    """
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).fillna(0)
     loss = (-delta.where(delta < 0, 0)).fillna(0)
-
     avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
 def check_signal(symbol, settings, broker):
-    """
-    Checks RSI and executes trades.
-    """
     logger.debug(f"Checking {symbol}...")
     
     try:
-        # Optimized: Only fetch 20 days.
-        # This is enough for 14-period RSI on 2h timeframe (approx 140 bars needed).
         df = yf.download(symbol, period='20d', interval='1h', progress=False, session=session)
         
         if df.empty:
@@ -738,9 +736,7 @@ def check_signal(symbol, settings, broker):
             return
         
         # Resample
-        agg_logic = {
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }
+        agg_logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
         df_resampled = df.resample(settings.get('timeframe', '2h')).apply(agg_logic).dropna()
 
         # Indicators
@@ -757,33 +753,54 @@ def check_signal(symbol, settings, broker):
         threshold = settings.get('rsi_panic_threshold', 30)
         if current_rsi < threshold:
             
+            # 1. Check existing position
             if broker.get_position(symbol):
-                logger.info(f"Signal active ({current_rsi:.2f}), but position held.")
+                logger.info(f"Signal active, but position held.")
+                return
+
+            # 2. Check open orders (Prevent stacking orders if fill is slow)
+            if broker.has_open_order(symbol):
+                logger.info(f"Signal active, but open order exists.")
                 return
 
             logger.warning(f"🚨 BUY SIGNAL: {symbol} (RSI {current_rsi:.2f})")
             
             tp_pct = settings.get('take_profit_pct', 0.05)
             sl_pct = settings.get('stop_loss_pct', 0.02)
-            
             tp_price = round(current_price * (1 + tp_pct), 2)
             sl_price = round(current_price * (1 - sl_pct), 2)
+
+            # 3. Generate Idempotency ID (Unique per candle)
+            last_ts = df_resampled.index[-1]
+            # ID format: RSI-SYMBOL-TIMESTAMP
+            raw_id = f"RSI-{symbol}-{int(last_ts.timestamp())}"
+            # Shorten hash for API limit compatibility (Alpaca max 48 chars)
+            dedupe_id = hashlib.md5(raw_id.encode()).hexdigest()
 
             order = broker.submit_bracket_order(
                 symbol=symbol,
                 qty=settings.get('qty', 1),
                 side='buy',
                 take_profit_price=tp_price,
-                stop_loss_price=sl_price
+                stop_loss_price=sl_price,
+                client_order_id=dedupe_id
             )
 
             if order:
-                log_trade(symbol, 'buy', settings.get('qty', 1), current_price, "RSI_Panic")
+                log_trade(
+                    symbol=symbol, 
+                    side='buy', 
+                    qty=settings.get('qty', 1), 
+                    price=current_price, 
+                    strategy="RSI_Panic",
+                    client_order_id=dedupe_id
+                )
                 send_alert({
                     "EVENT": "PANIC BUY",
                     "Symbol": symbol,
                     "Price": f"${current_price}",
-                    "RSI": f"{current_rsi:.2f}"
+                    "RSI": f"{current_rsi:.2f}",
+                    "ID": dedupe_id
                 })
 
     except Exception as e:
@@ -800,15 +817,20 @@ import os
 from src.utils.logger import setup_logger
 
 logger = setup_logger("Database")
-# Use getenv so it matches the other files' logic
 DB_PATH = os.getenv("DB_PATH", "/app/data/trading.db")
+
+def _connect():
+    """Creates a connection with optimal settings for concurrency"""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=10) # Higher timeout for safety
+    # Enable WAL mode for concurrency (Dashboard reading while Bot writes)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
 
 def init_db():
     try:
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect()
         c = conn.cursor()
         
         # 1. Configuration Table
@@ -840,22 +862,19 @@ def init_db():
 
         conn.commit()
         conn.close()
-        logger.info("Database initialized successfully.")
+        logger.info("Database initialized successfully (WAL mode).")
     except Exception as e:
         logger.error(f"DB Init Failed: {e}")
 
 def vacuum_db(max_size_mb=500):
-    """
-    Auto-cleaning logic: Removes old logs/cache if DB gets too big.
-    """
     try:
         if not os.path.exists(DB_PATH):
             return
 
-        file_size = os.path.getsize(DB_PATH) / (1024 * 1024) # Size in MB
-        if file_size > (max_size_mb * 0.9): # 90% capacity warning
+        file_size = os.path.getsize(DB_PATH) / (1024 * 1024) 
+        if file_size > (max_size_mb * 0.9): 
             logger.warning(f"DB is large ({file_size:.2f}MB). Cleaning old data...")
-            conn = sqlite3.connect(DB_PATH)
+            conn = _connect()
             c = conn.cursor()
             c.execute("DELETE FROM market_cache") 
             c.execute("VACUUM") 
@@ -864,16 +883,19 @@ def vacuum_db(max_size_mb=500):
     except Exception as e:
         logger.error(f"Vacuum Failed: {e}")
 
-# --- THIS WAS MISSING ---
-def log_trade(symbol, side, qty, price, strategy="Unknown"):
+def log_trade(symbol, side, qty, price, strategy="Unknown", client_order_id=None):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _connect()
         c = conn.cursor()
-        c.execute("INSERT INTO trades (symbol, side, qty, price_filled, strategy) VALUES (?, ?, ?, ?, ?)",
-                  (symbol, side, qty, price, strategy))
+        c.execute("""INSERT INTO trades 
+                     (symbol, side, qty, price_filled, strategy, client_order_id) 
+                     VALUES (?, ?, ?, ?, ?, ?)""",
+                  (symbol, side, qty, price, strategy, client_order_id))
         conn.commit()
         conn.close()
         logger.info(f"Trade logged to DB: {side} {symbol} @ {price}")
+    except sqlite3.IntegrityError:
+        logger.warning(f"Duplicate trade detected for ID {client_order_id}, skipping log.")
     except Exception as e:
         logger.error(f"Failed to log trade: {e}")
 

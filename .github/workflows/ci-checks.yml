@@ -1,5 +1,4 @@
-﻿
-name: CI Checks
+﻿name: CI Checks
 
 on: [push, pull_request]
 
@@ -20,3 +19,6 @@ jobs:
         run: |
           # Stop build if syntax errors or undefined names
           flake8 src --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Run Tests
+        run: |
+          pytest -q
