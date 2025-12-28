@@ -1,118 +1,49 @@
 //@version=5
-strategy("Algo Pattern Sniper [Institutional Upgrade]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+strategy("Algo Pattern Sniper [Universal]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
 
 // --- 1. CONFIGURATION ---
-// Basic Strategy Settings
-emaLength     = input.int(200, "Trend Filter (EMA)", minval=50, group="Strategy Core")
-rsiLength     = input.int(14, "RSI Length", group="Strategy Core")
-rsiOverSold   = input.int(30, "RSI Panic Threshold", group="Strategy Core")
+// These inputs allow you to tune the bot for different stocks without rewriting code
+emaLength = input.int(200, "Trend Filter (EMA)", minval=50)
+rsiLength = input.int(14, "RSI Length")
+rsiOverSold = input.int(30, "RSI Oversold Level")
+stopLossPct = input.float(2.0, "Stop Loss %") / 100
+takeProfitPct = input.float(4.0, "Take Profit %") / 100
 
-// Execution Settings
-baseStopLoss  = input.float(2.0, "Base Stop Loss %", step=0.1, group="Execution") / 100
-baseTakeProfit= input.float(4.0, "Base Take Profit %", step=0.1, group="Execution") / 100
-
-// Institutional Filters (The "Secret Sauce")
-useRSFilter   = input.bool(true, "Filter: Relative Strength (QQQ)", group="Institutional Filters")
-benchmark     = input.symbol("NASDAQ:QQQ", "Benchmark Ticker", group="Institutional Filters")
-useVixRegime  = input.bool(true, "Filter: VIX Volatility Regime", group="Institutional Filters")
-vixTicker     = input.symbol("CBOE:VIX", "VIX Ticker", group="Institutional Filters")
-vixHigh       = input.float(25.0, "High Volatility Threshold (VIX)", group="Institutional Filters")
-useEarnings   = input.bool(true, "Filter: Earnings Blackout", group="Institutional Filters")
-earningsDays  = input.int(3, "Days Buffer around Earnings", group="Institutional Filters")
-
-// --- 2. DATA FETCHING (request.security) ---
-// We fetch data from other assets (QQQ and VIX) without repainting issues
-[bmClose, bmHigh, bmLow] = request.security(benchmark, timeframe.period, [close, high, low], lookahead=barmerge.lookahead_on)
-[vixClose]               = request.security(vixTicker, timeframe.period, [close], lookahead=barmerge.lookahead_on)
-
-// --- 3. INDICATORS ---
-// Asset Indicators
+// --- 2. INDICATORS ---
+// Calculate moving averages and RSI
 ema200 = ta.ema(close, emaLength)
-rsi    = ta.rsi(close, rsiLength)
+rsi = ta.rsi(close, rsiLength)
 
-// Benchmark (Market) Indicators
-bmEma  = ta.ema(bmClose, emaLength)
-bmRsi  = ta.rsi(bmClose, rsiLength)
-
-// --- 4. PATTERN RECOGNITION ---
-// Bullish Engulfing
+// --- 3. PATTERN RECOGNITION LOGIC ---
+// Define what a "Bullish Engulfing" candle looks like mathematically
+// Rule: Current Green candle body engulfs previous Red candle body
 isBullishEngulfing = open[1] > close[1] and close > open and close >= open[1] and open <= close[1]
-// Hammer
+
+// Define a "Hammer" candle
+// Rule: Small body, long lower wick (2x body size)
 bodySize = math.abs(close - open)
 lowerWick = math.min(close, open) - low
 isHammer = lowerWick > (bodySize * 2) and (high - math.max(close, open)) < bodySize
 
-// --- 5. INSTITUTIONAL LOGIC GATES ---
-
-// Gate A: Trend Filter (Safety)
-// We still generally want price > EMA, but for deep panic dips, we might allow a slight pierce.
-// Sticking to your original rule: Trend must be UP.
-trendSafe = close > ema200
-
-// Gate B: Relative Strength Filter
-// Logic: If we are crashing, is the market crashing too?
-// If TSLA RSI < 30 but QQQ RSI > 60, TSLA is broken. Don't buy.
-// We want QQQ to be "weak" (RSI < 50) or "uptrending" (Close > EMA). 
-// We generally avoid buying if Market is Overbought while Stock is Oversold (Divergence).
-rsCondition = not useRSFilter or (bmRsi < 60) 
-
-// Gate C: Earnings Blackout
-// We check if the current bar time is close to the next or previous earnings
-// Note: Pine script earnings data availability varies by asset. 
-nextEarnings = earnings.future_time
-// Simple check: Is next earnings within X days?
-msPerDay = 1000 * 60 * 60 * 24
-daysToEarnings = (nextEarnings - time) / msPerDay
-earningsSafe = not useEarnings or (daysToEarnings > earningsDays or na(daysToEarnings))
-
-// --- 6. DYNAMIC EXECUTION (VIX Regime) ---
-// If VIX is high (Fear is high), we increase Take Profit targets because rebounds are violent.
-dynamicTP = baseTakeProfit
-dynamicSL = baseStopLoss
-
-if (useVixRegime and vixClose > vixHigh)
-    // VIX > 25: Increase TP by 50% (e.g., 4% -> 6%)
-    dynamicTP := baseTakeProfit * 1.5
-    // Slightly wider stop loss to survive volatility
-    dynamicSL := baseStopLoss * 1.2
-
-// --- 7. TRADING LOGIC ---
+// --- 4. TRADING LOGIC (The "Algorithm") ---
 // LONG CONDITION:
-// 1. Trend is Safe
-// 2. Pattern or Panic Signal
-// 3. RS Filter passed
-// 4. Earnings Filter passed
-signalPanic   = rsi < rsiOverSold
-signalPattern = (isBullishEngulfing or (isHammer and rsi < 50))
+// 1. Price is ABOVE the 200 EMA (We only buy in uptrends - statistically safer)
+// 2. RSI is low (Price is "cheap") OR we see a strong pattern
+longCondition = (close > ema200) and (isBullishEngulfing or (isHammer and rsi < 50))
 
-longCondition = trendSafe and (signalPanic or signalPattern) and rsCondition and earningsSafe
+// EXIT CONDITION:
+// We use a fixed Stop Loss and Take Profit calculated from entry price
+longStopPrice  = strategy.position_avg_price * (1 - stopLossPct)
+longTakeProfit = strategy.position_avg_price * (1 + takeProfitPct)
 
-// EXIT CALCULATIONS
-longStopPrice  = strategy.position_avg_price * (1 - dynamicSL)
-longTakeProfit = strategy.position_avg_price * (1 + dynamicTP)
-
-// --- 8. EXECUTION ---
+// --- 5. EXECUTION ---
 if (longCondition)
-    strategy.entry("Sniper Long", strategy.long, comment="Entry | VIX: " + str.tostring(vixClose, "#.##"))
+    strategy.entry("Long", strategy.long, comment="Pattern Detected")
 
 if (strategy.position_size > 0)
-    strategy.exit("Exit Long", "Sniper Long", stop=longStopPrice, limit=longTakeProfit, comment_profit="Target Hit", comment_loss="Stop Hit")
+    strategy.exit("Exit Long", "Long", stop=longStopPrice, limit=longTakeProfit)
 
-// --- 9. VISUALIZATION ---
-// Plot EMA
-plot(ema200, color=color.blue, title="200 EMA", linewidth=2)
-
-// Plot Panic Signals
-plotshape(longCondition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Buy Signal")
-
-// Color Background during High VIX (High Volatility Regime)
-bgcolor(useVixRegime and vixClose > vixHigh ? color.new(color.red, 90) : na, title="High VIX Regime")
-
-// Data Table for Debugging
-var table infoTable = table.new(position.top_right, 4, 2, border_width = 1)
-if barstate.islast
-    table.cell(infoTable, 0, 0, "Market RSI (QQQ)", text_color=color.white, bgcolor=color.gray)
-    table.cell(infoTable, 0, 1, str.tostring(bmRsi, "#.##"), text_color=bmRsi < 50 ? color.red : color.green, bgcolor=color.black)
-    
-    table.cell(infoTable, 1, 0, "VIX Level", text_color=color.white, bgcolor=color.gray)
-    table.cell(infoTable, 1, 1, str.tostring(vixClose, "#.##"), text_color=vixClose > vixHigh ? color.red : color.green, bgcolor=color.black)
+// --- 6. VISUALIZATION ---
+// Plot the EMA and color the background when a trade is active
+plot(ema200, color=color.blue, title="200 EMA")
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : na)
