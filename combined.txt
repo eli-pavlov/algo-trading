@@ -9,7 +9,28 @@ TRADING_MODE=PAPER
 LOG_LEVEL=INFO
 
 // .github/workflows/ci-checks.yml
+﻿
+name: CI Checks
 
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Lint with Flake8
+        run: |
+          # Stop build if syntax errors or undefined names
+          flake8 src --count --select=E9,F63,F7,F82 --show-source --statistics
 
 // .gitignore
 ﻿# Python artifacts
@@ -33,16 +54,121 @@ logs/
 .idea/
 
 // config/settings.yaml
+﻿system:
+  update_interval_minutes: 1
+  log_level: "INFO"
+  timezone: "US/Eastern"
 
+strategies:
+  TSLA:
+    enabled: true
+    timeframe: "2h"
+    rsi_length: 14
+    rsi_panic_threshold: 7   # The "Crash" level
+    qty: 5
+    take_profit_pct: 0.07    # +7%
+    stop_loss_pct: 0.02      # -2%
+
+  NVDA:
+    enabled: true
+    timeframe: "2h"
+    rsi_length: 14
+    rsi_panic_threshold: 10
+    qty: 2
+    take_profit_pct: 0.05
+    stop_loss_pct: 0.03
 
 // docker-compose.yml
+﻿version: '3.8'
 
+services:
+  algo-bot:
+    build: .
+    container_name: tradebot
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config   # Allow editing settings without rebuild
+      - ./logs:/app/logs
+      - ./yfinance.cache:/app/yfinance.cache
+    env_file:
+      - .env
 
 // Dockerfile
+﻿# Use slim python image
+FROM python:3.9-slim
 
+# Prevent python from buffering stdout (logs appear instantly)
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Install dependencies first (caching layer)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application
+COPY . .
+
+# Run the bot
+CMD ["python", "-m", "src.main"]
 
 // Jenkinsfile
+﻿pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = "algo-trader"
+    }
 
+    stages {
+        stage('Build') {
+            steps {
+                sh 'docker build -t ${DOCKER_IMAGE}:${BRANCH_NAME} .'
+            }
+        }
+
+        stage('Deploy Staging') {
+            when { branch 'dev' }
+            steps {
+                withCredentials([string(credentialsId: 'alpaca-paper-key', variable: 'KEY'),
+                                 string(credentialsId: 'alpaca-paper-secret', variable: 'SECRET')]) {
+                    sh '''
+                        docker stop bot-staging || true
+                        docker rm bot-staging || true
+                        docker run -d --name bot-staging --restart always \
+                            -e ALPACA_API_KEY=$KEY \
+                            -e ALPACA_SECRET_KEY=$SECRET \
+                            -e ALPACA_BASE_URL="https://paper-api.alpaca.markets" \
+                            -e TRADING_MODE="PAPER" \
+                            -v $PWD/config:/app/config \
+                            ${DOCKER_IMAGE}:${BRANCH_NAME}
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Production') {
+            when { branch 'main' }
+            steps {
+                withCredentials([string(credentialsId: 'alpaca-live-key', variable: 'KEY'),
+                                 string(credentialsId: 'alpaca-live-secret', variable: 'SECRET')]) {
+                    sh '''
+                        docker stop bot-prod || true
+                        docker rm bot-prod || true
+                        docker run -d --name bot-prod --restart always \
+                            -e ALPACA_API_KEY=$KEY \
+                            -e ALPACA_SECRET_KEY=$SECRET \
+                            -e ALPACA_BASE_URL="https://api.alpaca.markets" \
+                            -e TRADING_MODE="LIVE" \
+                            -v $PWD/config:/app/config \
+                            ${DOCKER_IMAGE}:${BRANCH_NAME}
+                    '''
+                }
+            }
+        }
+    }
+}
 
 // LICENSE
                                  Apache License
@@ -270,7 +396,65 @@ flake8
 
 
 // src/brokers/alpaca_api.py
+﻿import os
+import alpaca_trade_api as tradeapi
+from src.utils.logger import setup_logger
 
+logger = setup_logger("AlpacaBroker")
+
+class AlpacaClient:
+    def __init__(self):
+        # API Keys are loaded from Environment Variables (Docker/Jenkins injects them)
+        self.api_key = os.getenv("ALPACA_API_KEY")
+        self.secret_key = os.getenv("ALPACA_SECRET_KEY")
+        self.base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+        if not self.api_key or not self.secret_key:
+            logger.critical("Alpaca API Keys missing! Check .env")
+            raise ValueError("Missing Credentials")
+
+        self.api = tradeapi.REST(
+            key_id=self.api_key,
+            secret_key=self.secret_key,
+            base_url=self.base_url,
+            api_version='v2'
+        )
+        logger.info(f"Connected to Alpaca at {self.base_url}")
+
+    def get_account(self):
+        try:
+            return self.api.get_account()
+        except Exception as e:
+            logger.error(f"Error fetching account: {e}")
+            return None
+
+    def get_position(self, symbol):
+        try:
+            return self.api.get_position(symbol)
+        except Exception:
+            # Returns None if no position exists
+            return None
+
+    def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price):
+        """
+        Submits a market order with attached Take Profit and Stop Loss
+        """
+        try:
+            order = self.api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type='market',
+                time_in_force='gtc',
+                order_class='bracket',
+                take_profit={'limit_price': take_profit_price},
+                stop_loss={'stop_price': stop_loss_price}
+            )
+            logger.info(f"Order Submitted: {side} {qty} {symbol}")
+            return order
+        except Exception as e:
+            logger.error(f"Failed to submit order for {symbol}: {e}")
+            return None
 
 // src/brokers/kraken_api.py
 
@@ -279,10 +463,150 @@ flake8
 
 
 // src/main.py
+﻿import time
+import schedule
+import yaml
+import os
+from dotenv import load_dotenv
+from src.utils.logger import setup_logger
+from src.brokers.alpaca_api import AlpacaClient
+from src.strategies.rsi_panic import check_signal
 
+# Load Environment and Logging
+load_dotenv()
+logger = setup_logger("Main")
+
+CONFIG_PATH = "config/settings.yaml"
+
+def load_config():
+    with open(CONFIG_PATH, "r") as f:
+        return yaml.safe_load(f)
+
+def job():
+    try:
+        config = load_config()
+        broker = AlpacaClient() # Re-init to ensure fresh connection/auth check
+
+        logger.info("--- Starting Analysis Cycle ---")
+        
+        strategies = config.get("strategies", {})
+        for symbol, settings in strategies.items():
+            if settings.get("enabled"):
+                check_signal(symbol, settings, broker)
+        
+        logger.info("--- Cycle Complete ---")
+
+    except Exception as e:
+        logger.error(f"Critical Error in Job Cycle: {e}")
+
+def main():
+    logger.info("🤖 Algo Trading Bot Starting...")
+    logger.info(f"Mode: {os.getenv('TRADING_MODE', 'UNKNOWN')}")
+    
+    # Run once immediately on startup
+    job()
+
+    # Schedule subsequent runs
+    config = load_config()
+    interval = config['system']['update_interval_minutes']
+    schedule.every(interval).minutes.do(job)
+
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()
 
 // src/strategies/rsi_panic.py
+﻿import yfinance as yf
+import pandas as pd
+from requests_cache import CachedSession
+from datetime import timedelta
+from src.utils.logger import setup_logger
+from src.utils.notifications import send_alert
 
+logger = setup_logger("RSI_Strategy")
+
+# Cache Yahoo data for 1 hour to prevent rate limits/slow restarts
+session = CachedSession('yfinance.cache', expire_after=timedelta(hours=1))
+
+def calculate_rsi(series, period=14):
+    """
+    Native RSI calculation (Wilder's Smoothing) to avoid dependency issues.
+    """
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).fillna(0)
+    loss = (-delta.where(delta < 0, 0)).fillna(0)
+
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def check_signal(symbol, settings, broker):
+    """
+    Main logic: Checks RSI and executes trade if conditions met.
+    """
+    logger.debug(f"Checking {symbol}...")
+    
+    # 1. Fetch History (Need ~60 days of 1h data to resample accurately)
+    try:
+        df = yf.download(symbol, period='60d', interval='1h', progress=False, session=session)
+        if df.empty:
+            logger.warning(f"No data for {symbol}")
+            return
+        
+        # Resample to the Strategy Timeframe (e.g., 2H)
+        logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+        df_resampled = df.resample(settings['timeframe']).apply(logic).dropna()
+
+        # 2. Calculate Indicators
+        df_resampled['RSI'] = calculate_rsi(df_resampled['Close'], settings['rsi_length'])
+        
+        last_candle = df_resampled.iloc[-1]
+        current_price = last_candle['Close']
+        current_rsi = last_candle['RSI']
+
+        logger.info(f"{symbol} | Price: {current_price:.2f} | RSI: {current_rsi:.2f}")
+
+        # 3. Check Trigger (RSI < Threshold)
+        if current_rsi < settings['rsi_panic_threshold']:
+            
+            # Check if we already own it
+            if broker.get_position(symbol):
+                logger.info(f"Signal active, but position already held for {symbol}.")
+                return
+
+            logger.warning(f"🚨 BUY SIGNAL DETECTED: {symbol} (RSI {current_rsi:.2f})")
+            
+            # Calculate Bracket Prices
+            tp_price = round(current_price * (1 + settings['take_profit_pct']), 2)
+            sl_price = round(current_price * (1 - settings['stop_loss_pct']), 2)
+
+            # Execute
+            order = broker.submit_bracket_order(
+                symbol=symbol,
+                qty=settings['qty'],
+                side='buy',
+                take_profit_price=tp_price,
+                stop_loss_price=sl_price
+            )
+
+            if order:
+                send_alert({
+                    "EVENT": "PANIC BUY EXECUTED",
+                    "Symbol": symbol,
+                    "Price": f"${current_price}",
+                    "RSI": f"{current_rsi:.2f}",
+                    "Take Profit": f"${tp_price}",
+                    "Stop Loss": f"${sl_price}"
+                })
+
+    except Exception as e:
+        logger.error(f"Strategy Error on {symbol}: {e}")
 
 // src/strategies/__init__.py
 
@@ -291,10 +615,53 @@ flake8
 
 
 // src/utils/logger.py
+﻿import logging
+import sys
+import os
 
+def setup_logger(name="AlgoBot"):
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(log_level)
+
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
 
 // src/utils/notifications.py
+﻿import requests
+import os
+import json
+from src.utils.logger import setup_logger
 
+logger = setup_logger("Notifier")
+
+def send_alert(data):
+    """
+    Sends a formatted JSON payload to the Webhook URL defined in .env
+    """
+    url = os.getenv("WEBHOOK_URL")
+    if not url:
+        logger.warning("No WEBHOOK_URL set. Skipping alert.")
+        return
+
+    # Format dict into a readable string block
+    text_block = "\n".join([f"*{key}:* {value}" for key, value in data.items()])
+    payload = {"text": text_block}
+
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        response.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to send webhook: {e}")
 
 // src/utils/__init__.py
 

@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from src.utils.logger import setup_logger
 from src.brokers.alpaca_api import AlpacaClient
 from src.strategies.rsi_panic import check_signal
+from src.utils.database import init_db
 
 # Load Environment and Logging
 load_dotenv()
@@ -35,6 +36,7 @@ def job():
         logger.error(f"Critical Error in Job Cycle: {e}")
 
 def main():
+    init_db()  # <--- Initialize DB on startup
     logger.info("🤖 Algo Trading Bot Starting...")
     logger.info(f"Mode: {os.getenv('TRADING_MODE', 'UNKNOWN')}")
     
