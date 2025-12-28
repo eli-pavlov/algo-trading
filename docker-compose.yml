@@ -1,1 +1,13 @@
-﻿
+﻿version: '3.8'
+
+services:
+  algo-bot:
+    build: .
+    container_name: tradebot
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config   # Allow editing settings without rebuild
+      - ./logs:/app/logs
+      - ./yfinance.cache:/app/yfinance.cache
+    env_file:
+      - .env
