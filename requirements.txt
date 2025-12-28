@@ -9,5 +9,6 @@ pyyaml
 requests
 requests-cache
 schedule
+streamlit
 pytest
 flake8

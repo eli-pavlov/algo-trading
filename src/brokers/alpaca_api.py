@@ -6,7 +6,6 @@ logger = setup_logger("AlpacaBroker")
 
 class AlpacaClient:
     def __init__(self):
-        # API Keys are loaded from Environment Variables (Docker/Jenkins injects them)
         self.api_key = os.getenv("ALPACA_API_KEY")
         self.secret_key = os.getenv("ALPACA_SECRET_KEY")
         self.base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
@@ -34,13 +33,9 @@ class AlpacaClient:
         try:
             return self.api.get_position(symbol)
         except Exception:
-            # Returns None if no position exists
             return None
 
     def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price):
-        """
-        Submits a market order with attached Take Profit and Stop Loss
-        """
         try:
             order = self.api.submit_order(
                 symbol=symbol,

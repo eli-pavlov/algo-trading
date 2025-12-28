@@ -1,23 +1,12 @@
 ﻿system:
-  update_interval_minutes: 1
   log_level: "INFO"
-  timezone: "US/Eastern"
 
 strategies:
   TSLA:
     enabled: true
     timeframe: "2h"
     rsi_length: 14
-    rsi_panic_threshold: 7   # The "Crash" level
-    qty: 5
-    take_profit_pct: 0.07    # +7%
-    stop_loss_pct: 0.02      # -2%
-
-  NVDA:
-    enabled: true
-    timeframe: "2h"
-    rsi_length: 14
-    rsi_panic_threshold: 10
-    qty: 2
+    rsi_panic_threshold: 30
+    qty: 1
     take_profit_pct: 0.05
-    stop_loss_pct: 0.03
+    stop_loss_pct: 0.02

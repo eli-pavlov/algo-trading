@@ -3,12 +3,29 @@
 services:
   algo-bot:
     image: algo-trader
+    container_name: tradebot
+    restart: unless-stopped
     volumes:
-      # PERSIST THE DB (Critical)
-      - ./data:/app/data 
-      # CACHE YFINANCE (Efficiency)
-      - ./cache:/app/cache
-      # LOGS
+      - ./data:/app/data       # Shared DB
+      - ./cache:/app/cache     # YFinance Cache
+      - ./logs:/app/logs       # Logs
+      - ./config:/app/config   # Config for seeding
+    environment:
+      - DB_PATH=/app/data/trading.db
+      - TRADING_MODE=PAPER
+    # Keeps the container running if the python script exits unexpectedly (optional safety)
+    command: ["python", "-m", "src.main"]
+
+  dashboard:
+    image: algo-trader
+    container_name: trade_ui
+    restart: unless-stopped
+    # Override default command to run Streamlit
+    command: ["streamlit", "run", "src/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data       # Must share same volume as bot
       - ./logs:/app/logs
     environment:
       - DB_PATH=/app/data/trading.db
