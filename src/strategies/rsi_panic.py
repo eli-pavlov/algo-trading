@@ -31,8 +31,7 @@ def check_signal(symbol, settings, broker):
     logger.debug(f"Checking {symbol}...")
     
     try:
-        df = yf.download(symbol, period='20d', interval='1h', progress=False, session=session)
-        
+        df = yf.download(symbol, period='30d', interval='1h', progress=False, session=session)
         if df.empty:
             logger.warning(f"No data fetched for {symbol}")
             return

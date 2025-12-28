@@ -87,8 +87,8 @@ services:
       - ./config:/app/config   # Config for seeding
     environment:
       - DB_PATH=/app/data/trading.db
+      - YF_CACHE_PATH=/app/cache/yfinance  # Explicit Cache Path
       - TRADING_MODE=PAPER
-    # Keeps the container running if the python script exits unexpectedly (optional safety)
     command: ["python", "-m", "src.main"]
 
   dashboard:
@@ -98,12 +98,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # Override default command to run Streamlit
     command: ["streamlit", "run", "src/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data       # Must share same volume as bot
+      - ./data:/app/data
       - ./logs:/app/logs
     environment:
       - DB_PATH=/app/data/trading.db
@@ -454,17 +453,17 @@ class AlpacaClient:
             return None
 
     def has_open_order(self, symbol):
-        """Checks if there are any open orders for this symbol to prevent stacking"""
+        """Checks if there are any open orders for this symbol"""
         try:
-            orders = self.api.list_orders(status='open', symbols=[symbol], limit=1)
-            return len(orders) > 0
+            # Fetch generic list and filter client-side for absolute correctness
+            orders = self.api.list_orders(status='open', limit=100)
+            return any(o.symbol == symbol for o in orders)
         except Exception as e:
             logger.error(f"Error checking open orders: {e}")
             return False
 
     def submit_bracket_order(self, symbol, qty, side, take_profit_price, stop_loss_price, client_order_id=None):
         try:
-            # Prepare arguments, filtering out None for client_order_id if not provided
             params = {
                 "symbol": symbol,
                 "qty": qty,
@@ -629,8 +628,9 @@ DB_PATH = os.getenv("DB_PATH", "/app/data/trading.db")
 
 def get_active_strategies():
     try:
-        # Use context manager for auto-close
-        with sqlite3.connect(DB_PATH) as conn:
+        # Improved connection logic for reading
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            conn.execute("PRAGMA busy_timeout=5000;") # Wait 5s if locked
             c = conn.cursor()
             c.execute("SELECT symbol, strategy_type, params FROM strategies WHERE is_active=1")
             rows = c.fetchall()
@@ -649,17 +649,14 @@ def get_active_strategies():
 def seed_db_from_yaml():
     try:
         if not os.path.exists(DB_PATH):
-             # Let init_db handle creation first
              return
 
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
             c = conn.cursor()
-            # Check if strategies table exists
             c.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='strategies'")
             if c.fetchone()[0] == 0: 
                 return 
 
-            # Check if empty
             c.execute("SELECT count(*) FROM strategies")
             if c.fetchone()[0] == 0:
                 print("⚡ DB is empty. Seeding from config/settings.yaml...")
@@ -678,8 +675,12 @@ def seed_db_from_yaml():
                                 "stop_loss_pct": settings.get('stop_loss_pct', 0.02),
                                 "timeframe": settings.get('timeframe', '2h')
                             }
-                            c.execute("INSERT INTO strategies VALUES (?, ?, ?, 1)", 
-                                      (symbol, 'rsi_panic', json.dumps(params)))
+                            # Explicit columns for safety
+                            c.execute("""
+                                INSERT INTO strategies (symbol, strategy_type, params, is_active) 
+                                VALUES (?, ?, ?, 1)
+                            """, (symbol, 'rsi_panic', json.dumps(params)))
+                    conn.commit()
                     print("✅ Seeding complete.")
                 else:
                     print("⚠️ Config file not found for seeding.")
@@ -719,7 +720,7 @@ def main():
         print(f"CRITICAL: Could not connect to Broker: {e}")
         return
 
-    # Run once immediately on startup
+    # Run once immediately
     job(broker)
 
     schedule.every(1).minutes.do(job, broker=broker)
@@ -735,6 +736,7 @@ if __name__ == "__main__":
 ﻿import yfinance as yf
 import pandas as pd
 import hashlib
+import os
 from requests_cache import CachedSession
 from datetime import timedelta
 from src.utils.logger import setup_logger
@@ -743,8 +745,12 @@ from src.utils.database import log_trade
 
 logger = setup_logger("RSI_Strategy")
 
-# Cache Yahoo data to prevent rate limits
-session = CachedSession('/app/cache/yfinance', expire_after=timedelta(hours=1))
+# Fix: Use environment variable for cache path to support CI/Local/Docker
+# Fallback to local './cache' if not running in Docker
+CACHE_PATH = os.getenv("YF_CACHE_PATH", "./cache/yfinance")
+os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+
+session = CachedSession(CACHE_PATH, expire_after=timedelta(hours=1))
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -789,7 +795,7 @@ def check_signal(symbol, settings, broker):
                 logger.info(f"Signal active, but position held.")
                 return
 
-            # 2. Check open orders (Prevent stacking orders if fill is slow)
+            # 2. Check open orders
             if broker.has_open_order(symbol):
                 logger.info(f"Signal active, but open order exists.")
                 return
@@ -801,11 +807,9 @@ def check_signal(symbol, settings, broker):
             tp_price = round(current_price * (1 + tp_pct), 2)
             sl_price = round(current_price * (1 - sl_pct), 2)
 
-            # 3. Generate Idempotency ID (Unique per candle)
+            # 3. Generate Idempotency ID
             last_ts = df_resampled.index[-1]
-            # ID format: RSI-SYMBOL-TIMESTAMP
             raw_id = f"RSI-{symbol}-{int(last_ts.timestamp())}"
-            # Shorten hash for API limit compatibility (Alpaca max 48 chars)
             dedupe_id = hashlib.md5(raw_id.encode()).hexdigest()
 
             order = broker.submit_bracket_order(
