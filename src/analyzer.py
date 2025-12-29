@@ -5,6 +5,7 @@ import optuna
 import urllib3
 import pandas as pd
 import gc
+import shutil
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
@@ -61,8 +62,10 @@ def objective(trial, df):
 
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
-    # Initialize df to empty DataFrame to satisfy linter (F821)
+    
+    # FIX: Initialize df here so it exists in the outer scope for the linter
     df = pd.DataFrame()
+    
     try:
         # Download data with threads=False to prevent CFFI/Curl crashes on ARM
         df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False)
@@ -98,7 +101,6 @@ if __name__ == "__main__":
     # Clear yfinance cache to prevent corruption errors
     cache_dir = os.path.expanduser("~/.cache/yfinance")
     if os.path.exists(cache_dir):
-        import shutil
         shutil.rmtree(cache_dir)
 
     broker = Broker()
