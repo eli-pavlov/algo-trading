@@ -5,115 +5,158 @@ import time
 from src.broker import Broker
 from src.database import get_status, update_status, DB_PATH
 
+# 1. Page Config
 st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
 
-# Initialize Broker
+# 2. Broker Init
 broker = Broker()
+conn_status, conn_msg = broker.test_connection()
 
-# --- HEADER: Market Clock ---
-st.markdown(f"### 🕒 {broker.get_market_clock()}")
-st.markdown("---")
+# 3. Sidebar: The New "Overview" Home
+with st.sidebar:
+    st.title("📡 System Overview")
+    
+    if conn_status:
+        st.success("API Status: 🟢 ONLINE")
+    else:
+        st.error(f"API Status: 🔴 DISCONNECTED\n{conn_msg}")
+        
+    st.markdown("---")
+    
+    # Live Account Metrics
+    acc = broker.get_account_stats()
+    c1, c2 = st.columns(2)
+    c1.metric("Buying Power", f"${acc.get('Power', 0):,.2f}")
+    c2.metric("Cash", f"${acc.get('Cash', 0):,.2f}")
+    
+    st.markdown("---")
+    st.subheader("📈 Performance")
+    
+    # Portfolio History
+    hist = broker.get_portfolio_history_stats()
+    st.metric("Total Equity", f"${acc.get('Equity', 0):,.2f}")
+    
+    # Compact Grid for Timeframes
+    h1, h2 = st.columns(2)
+    h1.metric("1 Day", hist.get('1D', 'N/A'))
+    h2.metric("1 Week", hist.get('1W', 'N/A'))
+    h3, h4 = st.columns(2)
+    h3.metric("1 Month", hist.get('1M', 'N/A'))
+    h4.metric("1 Year", hist.get('1A', 'N/A'))
+    
+    st.markdown("---")
+    
+    # Engine Control
+    engine_on = get_status("engine_running") == "1"
+    btn_label = "🛑 STOP ENGINE" if engine_on else "🚀 START ENGINE"
+    if st.button(btn_label, use_container_width=True):
+        update_status("engine_running", "0" if engine_on else "1")
+        st.rerun()
 
-# --- TOP ROW: Portfolio Performance ---
-col1, col2, col3, col4, col5 = st.columns(5)
-acc = broker.get_account_stats()
-hist = broker.get_portfolio_history_stats()
+# 4. Main Header: Market Clock
+clock_msg = broker.get_market_clock()
+if "🟢" in clock_msg:
+    st.info(f"### {clock_msg}")
+else:
+    st.warning(f"### {clock_msg}")
 
-with col1: st.metric("Total Equity", f"${acc.get('Equity', 0):,.2f}")
-with col2: st.metric("Day P/L", hist.get('1D', 'N/A'))
-with col3: st.metric("Week P/L", hist.get('1W', 'N/A'))
-with col4: st.metric("Month P/L", hist.get('1M', 'N/A'))
-with col5: st.metric("Year P/L", hist.get('1A', 'N/A'))
+# 5. Main Tabs
+tab_assets, tab_strat, tab_manual, tab_debug = st.tabs([
+    "📊 Assets & Performance", 
+    "⚙️ Strategies", 
+    "🕹️ Manual Control", 
+    "🔍 Debug"
+])
 
-# --- MAIN TABS ---
-tab_assets, tab_strat, tab_manual, tab_debug = st.tabs(["📊 Assets & Orders", "⚙️ Strategies", "🕹️ Manual Control", "🔍 Debug"])
-
-# 1. ASSETS TAB
+# --- TAB 1: ASSETS ---
 with tab_assets:
-    st.subheader("Active Holdings & Open Orders")
+    st.subheader("Holdings & Active Orders")
     try:
         positions = broker.api.list_positions()
         if positions:
             for p in positions:
-                with st.expander(f"{p.symbol} | {p.qty} shares | P/L: ${float(p.unrealized_pl):.2f} ({float(p.unrealized_plpc)*100:.2f}%)"):
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.write(f"**Current Price:** ${float(p.current_price):.2f}")
-                    c2.write(f"**Avg Entry:** ${float(p.avg_entry_price):.2f}")
-                    c3.write(f"**Market Value:** ${float(p.market_value):.2f}")
-                    c4.write(f"**Day P/L:** ${float(p.unrealized_intraday_pl):.2f}")
+                # Custom calculation for day P/L vs Total P/L
+                pl_day = float(p.unrealized_intraday_pl)
+                pl_total = float(p.unrealized_pl)
+                
+                # Visual Expander
+                with st.expander(f"{p.symbol} | {p.qty} shares | Total P/L: ${pl_total:.2f}"):
+                    # Metrics Grid
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Current Price", f"${float(p.current_price):.2f}")
+                    m2.metric("Avg Entry", f"${float(p.avg_entry_price):.2f}")
+                    m3.metric("Day P/L", f"${pl_day:.2f}", delta=pl_day)
+                    m4.metric("Total P/L", f"${pl_total:.2f}", delta=pl_total)
                     
-                    # Fetch Open Orders for this symbol
+                    st.divider()
+                    
+                    # Open Orders Section
+                    st.markdown("**⚠️ Active Stops & Limits**")
                     open_orders = broker.get_orders_for_symbol(p.symbol)
-                    st.write("---")
-                    st.write("**⚠️ Active Orders (Stop Loss / Take Profit):**")
                     if open_orders:
                         for o in open_orders:
-                            st.code(o)
+                            st.code(o, language="text")
                     else:
-                        st.caption("No active open orders.")
+                        st.caption("No active orders for this symbol.")
         else:
             st.info("No active positions.")
     except Exception as e:
         st.error(f"Error fetching assets: {e}")
 
-# 2. STRATEGIES TAB
+# --- TAB 2: STRATEGIES ---
 with tab_strat:
-    st.subheader("Strategy Parameters")
+    st.subheader("Active Bot Strategies")
     with sqlite3.connect(DB_PATH) as conn:
         try:
             df = pd.read_sql("SELECT * FROM strategies", conn)
             st.dataframe(df, use_container_width=True)
         except:
-            st.warning("Database empty or locked.")
+            st.warning("Strategy database is empty.")
 
-# 3. MANUAL CONTROL TAB (Enhanced)
+# --- TAB 3: MANUAL CONTROL ---
 with tab_manual:
-    st.subheader("🕹️ Advanced Order Entry")
+    st.subheader("🕹️ Place Trade")
     
-    c_sym, c_qty, c_side = st.columns(3)
-    sym = c_sym.text_input("Symbol", "TSLA").upper()
-    qty = c_qty.number_input("Quantity", min_value=0.1, value=1.0)
-    side = c_side.selectbox("Side", ["buy", "sell"])
-    
-    c_type, c_param = st.columns([1, 2])
-    type = c_type.selectbox("Order Type", ["market", "limit", "stop", "stop_limit", "trailing_stop"])
-    
-    # Dynamic inputs based on order type
-    limit_px, stop_px, trail_pct = None, None, None
-    if type == "limit":
-        limit_px = c_param.number_input("Limit Price", min_value=0.01)
-    elif type == "stop":
-        stop_px = c_param.number_input("Stop Price", min_value=0.01)
-    elif type == "stop_limit":
-        col_sl1, col_sl2 = c_param.columns(2)
-        stop_px = col_sl1.number_input("Stop Price", min_value=0.01)
-        limit_px = col_sl2.number_input("Limit Price", min_value=0.01)
-    elif type == "trailing_stop":
-        trail_pct = c_param.number_input("Trail Percent (%)", min_value=0.1, max_value=100.0)
+    with st.form("manual_order_form"):
+        c1, c2, c3 = st.columns(3)
+        sym = c1.text_input("Symbol", "TSLA").upper()
+        qty = c2.number_input("Qty", min_value=0.1, value=1.0)
+        side = c3.selectbox("Side", ["buy", "sell"])
+        
+        c4, c5 = st.columns(2)
+        type = c4.selectbox("Order Type", ["market", "limit", "stop", "stop_limit", "trailing_stop"])
+        
+        # Dynamic inputs logic would go here, but forms require static layout
+        # We put all potential inputs in one row for simplicity in the form
+        limit_px = c5.number_input("Limit Price (Optional)", min_value=0.0)
+        stop_px = c5.number_input("Stop Price (Optional)", min_value=0.0)
+        trail_pct = c5.number_input("Trail % (Optional)", min_value=0.0)
+        
+        submitted = st.form_submit_button("🚀 Submit Order", type="primary")
+        
+        if submitted:
+            # Filter inputs based on type
+            l_px = limit_px if type in ['limit', 'stop_limit'] else None
+            s_px = stop_px if type in ['stop', 'stop_limit'] else None
+            t_pct = trail_pct if type == 'trailing_stop' else None
 
-    if st.button("🚀 SUBMIT ORDER", type="primary"):
-        with st.spinner("Transmitting to Alpaca..."):
-            success, msg = broker.submit_manual_order(sym, qty, side, type, limit_px, stop_px, trail_pct)
+            success, msg = broker.submit_manual_order(sym, qty, side, type, l_px, s_px, t_pct)
+            
             if success:
                 st.success(f"✅ {msg}")
-                time.sleep(1) # Wait for Alpaca to process
-                st.rerun()    # Force UI Refresh
+                # REFRESH LOGIC: Wait 1s for Alpaca, then reload
+                with st.spinner("Refreshing Portfolio..."):
+                    time.sleep(1) 
+                    st.rerun()
             else:
                 st.error(f"❌ {msg}")
 
-# 4. DEBUG TAB
+# --- TAB 4: DEBUG ---
 with tab_debug:
-    conn_status, conn_msg = broker.test_connection()
-    st.write(f"**Connection:** {conn_msg}")
-    
-    engine_on = get_status("engine_running") == "1"
-    btn_txt = "🛑 STOP AUTOMATED ENGINE" if engine_on else "♻️ START AUTOMATED ENGINE"
-    if st.button(btn_txt):
-        update_status("engine_running", "0" if engine_on else "1")
-        st.rerun()
-
-# --- SIDEBAR INFO ---
-st.sidebar.title("Overview")
-st.sidebar.info(f"**Buying Power:** ${acc.get('Power', 0):,.2f}")
-st.sidebar.info(f"**Cash:** ${acc.get('Cash', 0):,.2f}")
-st.sidebar.caption("Auto-refreshing on interaction")
+    st.write("System Status:")
+    st.json({
+        "DB Path": DB_PATH,
+        "Connected": conn_status,
+        "Engine Running": engine_on,
+        "Last API Message": conn_msg
+    })

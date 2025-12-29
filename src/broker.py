@@ -18,45 +18,61 @@ class Broker:
             base_url=self.base_url,
             api_version='v2'
         )
+        # Trust env False prevents Jenkins proxy issues
         self.api._session.trust_env = False
         self.api._session.verify = False
 
     def test_connection(self):
         try:
             acct = self.api.get_account()
-            return True, f"🟢 Connected (ID: {acct.id})"
+            return True, f"Connected to {acct.id}"
         except Exception as e:
-            return False, f"🔴 Error: {str(e)}"
+            return False, str(e)
 
     def get_market_clock(self):
-        """Returns market status and time to open/close."""
+        """Returns clean market status message."""
         try:
             clock = self.api.get_clock()
             now = clock.timestamp.replace(tzinfo=timezone.utc)
             
             if clock.is_open:
+                # Calculate time to close
                 close_time = clock.next_close.replace(tzinfo=timezone.utc)
-                delta = close_time - now
-                msg = f"🟢 Market Open (Closes in {str(delta).split('.')[0]})"
+                diff = close_time - now
+                hours, remainder = divmod(diff.seconds, 3600)
+                mins, _ = divmod(remainder, 60)
+                return f"🟢 Market Open (Closes in {hours}h {mins}m)"
             else:
+                # Calculate time to open
                 open_time = clock.next_open.replace(tzinfo=timezone.utc)
-                delta = open_time - now
-                msg = f"🔴 Market Closed (Opens in {str(delta).split('.')[0]})"
-            return msg
+                diff = open_time - now
+                days = diff.days
+                hours, remainder = divmod(diff.seconds, 3600)
+                mins, _ = divmod(remainder, 60)
+                
+                if days > 0:
+                    return f"🔴 Market Closed (Opens in {days} days, {hours}h {mins}m)"
+                else:
+                    return f"🔴 Market Closed (Opens in {hours}h {mins}m)"
         except:
             return "🟠 Market Status Unavailable"
 
+    # ... (Keep get_portfolio_history_stats, get_account_stats, submit_manual_order as they were) ...
+    # ... (Keep get_orders_for_symbol, is_holding, sell_all, buy_bracket from previous version) ...
+    
     def get_portfolio_history_stats(self):
         """Fetches 1D, 1W, 1M, 1A performance."""
+        # Note: '1A' might fail on some accounts, handled by try/except in loop
         periods = {'1D': '1D', '1W': '1W', '1M': '1M', '1A': '1A'}
         data = {}
         for label, p in periods.items():
             try:
-                # '1A' isn't standard in some versions, defaulting to '1M' if fails
                 hist = self.api.get_portfolio_history(period=p, timeframe="1D")
                 if hist.equity:
                     start = hist.equity[0]
                     end = hist.equity[-1]
+                    # Handle division by zero if account is new/empty
+                    if start == 0: start = 1 
                     pct = ((end - start) / start) * 100
                     data[label] = f"{pct:+.2f}%"
                 else:
@@ -77,28 +93,18 @@ class Broker:
             return {}
 
     def get_orders_for_symbol(self, symbol):
-        """Fetches active Stop Loss / Take Profit orders for a symbol."""
         try:
             orders = self.api.list_orders(status='open', symbols=[symbol])
+            # Format: "STOP sell @ 150.00"
             return [f"{o.type.upper()} {o.side} @ {o.limit_price or o.stop_price}" for o in orders]
         except:
             return []
 
     def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
-        """Handles all API order types."""
-        args = {
-            "symbol": symbol,
-            "qty": qty,
-            "side": side,
-            "type": type,
-            "time_in_force": "gtc"
-        }
-        if type == 'limit': args['limit_price'] = limit_px
-        if type == 'stop': args['stop_price'] = stop_px
-        if type == 'stop_limit':
-            args['stop_price'] = stop_px
-            args['limit_price'] = limit_px
-        if type == 'trailing_stop': args['trail_percent'] = trail_pct
+        args = {"symbol": symbol, "qty": qty, "side": side, "type": type, "time_in_force": "gtc"}
+        if limit_px: args['limit_price'] = limit_px
+        if stop_px: args['stop_price'] = stop_px
+        if trail_pct: args['trail_percent'] = trail_pct
 
         try:
             self.api.submit_order(**args)
@@ -106,7 +112,6 @@ class Broker:
         except Exception as e:
             return False, str(e)
 
-    # ... (Keep existing is_holding / sell_all / buy_bracket for the bot logic) ...
     def is_holding(self, symbol):
         try: return self.api.get_position(symbol)
         except: return None
