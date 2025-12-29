@@ -1,7 +1,14 @@
+// .dockerignore
+
+
 // .env
+APIKEY=<apikey>
+SECRETKEY=<secretkey>
+REPORT_LINK=<report_link>
+PAPER_URL=<paper_url>
+DB_PATH=<db_path>
 
-
-// .github/workflows/lint-and-test.yml
+// .github/workflows/lint.yml
 name: CI Checks
 on: [push]
 
@@ -51,7 +58,6 @@ market_scanner.*
 
 // docker-compose.yaml
 version: '3.8'
-
 services:
   trading-bot:
     build: .
@@ -60,7 +66,10 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
-    command: python src/main.py
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
+      interval: 1m
+      retries: 3
 
   dashboard:
     build: .
@@ -73,23 +82,29 @@ services:
     command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
 
 // Dockerfile
-FROM python:3.9-slim
+version: '3.8'
+services:
+  trading-bot:
+    build: .
+    container_name: algo_heart
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
+      interval: 1m
+      retries: 3
 
-WORKDIR /app
-
-# Install system dependencies for numerical libraries
-RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-# Set Python Path to find internal modules
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-
-CMD ["python", "src/main.py"]
+  dashboard:
+    build: .
+    container_name: algo_ui
+    ports:
+      - "8501:8501"
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
 
 // Jenkinsfile
 ﻿pipeline {
@@ -98,6 +113,11 @@ CMD ["python", "src/main.py"]
         DOCKER_IMAGE = "algo-trader"
     }
     stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/youruser/algo-trading.git'
+            }
+        }
         stage('Lint') {
             steps {
                 sh 'pip install flake8 && flake8 src/'
@@ -105,6 +125,8 @@ CMD ["python", "src/main.py"]
         }
         stage('Build & Deploy') {
             steps {
+                // Docker Compose uses the local .env file which Jenkins should manage
+                sh 'cp $SECRET_FILE .env'
                 sh "docker compose build"
                 sh "docker compose up -d"
             }
@@ -361,16 +383,21 @@ if __name__ == "__main__":
 
 // src/broker.py
 import alpaca_trade_api as tradeapi
-import os
+import os, requests
 
 class Broker:
     def __init__(self):
         self.api = tradeapi.REST(
-            os.getenv("API_KEY"), 
-            os.getenv("SECRET_KEY"), 
-            os.getenv("BASE_URL", "https://paper-api.alpaca.markets"), 
+            os.getenv("APIKEY"), 
+            os.getenv("SECRETKEY"), 
+            os.getenv("PAPER_URL"), 
             'v2'
         )
+        self.webhook = os.getenv("REPORT_LINK")
+
+    def report(self, message):
+        if self.webhook:
+            requests.post(self.webhook, json={"text": f"🤖 *Bot Alert:* {message}"})
 
     def is_holding(self, symbol):
         try: return self.api.get_position(symbol)
@@ -378,12 +405,14 @@ class Broker:
 
     def buy_bracket(self, sym, qty, tp_pct, sl_pct):
         price = float(self.api.get_latest_trade(sym).price)
-        return self.api.submit_order(
+        order = self.api.submit_order(
             symbol=sym, qty=qty, side='buy', type='market', time_in_force='gtc', 
             order_class='bracket',
             take_profit={'limit_price': round(price * (1 + tp_pct), 2)},
             stop_loss={'stop_price': round(price * (1 - sl_pct), 2)}
         )
+        self.report(f"Entered {sym} at {price}. Target: +{tp_pct*100}%, SL: -{sl_pct*100}%")
+        return order
 
 // src/dashboard.py
 import streamlit as st
@@ -436,7 +465,7 @@ def init_db():
 
 def save_strategy(symbol, params, is_holding):
     if is_holding:
-        print(f"⚠️ {symbol} is currently active. Skipping re-optimization."); return
+        print(f"⚠️ {symbol} is currently active. Skipping rotation."); return
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("INSERT INTO strategies (symbol, params, is_active) VALUES (?,?,1) "
                      "ON CONFLICT(symbol) DO UPDATE SET params=excluded.params", 
@@ -454,7 +483,7 @@ import pandas_ta as ta
 import yfinance as yf
 
 def heart_beat():
-    # 1. Healthcheck file for Docker monitoring
+    # Healthcheck for Docker monitoring
     with open("/tmp/heartbeat", "w") as f:
         f.write(str(time.time()))
 
@@ -464,18 +493,20 @@ def heart_beat():
 
     strategies = get_strategies()
     for sym, p in strategies.items():
-        pos = broker.is_holding(sym)
-        
-        if not pos:
-            # Simple Trigger Example
+        if not broker.is_holding(sym):
             df = yf.download(sym, period="5d", interval="1h", progress=False)
+            if df.empty: continue
+            
             adx = df.ta.adx().iloc[-1]['ADX_14']
-            if adx > p.get('adx_trend', 25):
+            rsi = df.ta.rsi().iloc[-1]
+            
+            # The "Traffic Light" Logic
+            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
                 broker.buy_bracket(sym, 1, p['target'], p['stop'])
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trading Heart Started...")
+    print("🚀 Heart Beat Started...")
     schedule.every(1).minutes.do(heart_beat)
     while True:
         schedule.run_pending()

@@ -6,7 +6,8 @@
     stages {
         stage('Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/youruser/algo-trading.git'
+                // Pulls from your public repo
+                checkout scm
             }
         }
         stage('Lint') {
@@ -14,11 +15,19 @@
                 sh 'pip install flake8 && flake8 src/'
             }
         }
+        stage('Prepare Secrets') {
+            steps {
+                // Injects the secret .env file into the workspace safely
+                withCredentials([file(credentialsId: 'algo-trading-env', variable: 'SECRET_ENV')]) {
+                    sh 'cp $SECRET_ENV .env'
+                }
+            }
+        }
         stage('Build & Deploy') {
             steps {
-                // Docker Compose uses the local .env file which Jenkins should manage
                 sh "docker compose build"
                 sh "docker compose up -d"
+                sh "docker image prune -f"
             }
         }
     }

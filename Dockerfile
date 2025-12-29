@@ -1,23 +1,10 @@
-version: '3.8'
-services:
-  trading-bot:
-    build: .
-    container_name: algo_heart
-    restart: always
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-    healthcheck:
-      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
-      interval: 1m
-      retries: 3
-
-  dashboard:
-    build: .
-    container_name: algo_ui
-    ports:
-      - "8501:8501"
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-    command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
+FROM python:3.9-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+# Set PYTHONPATH so 'import src.database' works from anywhere
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "src/main.py"]
