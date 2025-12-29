@@ -1,59 +1,44 @@
 pipeline {
     agent any
+    options {
+        // This prevents the creation of 'Alpaca Paper Trading@2'
+        skipDefaultCheckout() 
+    }
     environment {
         DOCKER_IMAGE = "algo-trader"
+        // Get the absolute path of the current workspace
+        WS_PATH = "${WORKSPACE}" 
     }
     stages {
-        stage('Sanitize Disk') {
+        stage('Initialize & Cleanup') {
             steps {
-                echo "🧹 Cleaning Docker only (Safe Cleanup)..."
+                // Manually check out to the fixed workspace
+                checkout scm
+                echo "🧹 Cleaning up old Docker artifacts..."
                 sh "docker builder prune -f"
                 sh "docker image prune -f"
-                // REMOVED: sudo rm -rf /var/lib/jenkins/workspace/* // That line was the "Workspace Eraser" causing your error.
+                // Ensure Jenkins owns everything before we start
+                sh "sudo chown -R jenkins:jenkins ${WS_PATH}"
             }
-        }
-        stage('Checkout') {
-            steps { 
-                cleanWs()
-                checkout scm }
         }
         stage('Prepare Secrets') {
             steps {
                 withCredentials([file(credentialsId: 'algo-trading-env', variable: 'SECRET_ENV')]) {
-                    // Added -f to force overwrite and ensure permissions are fresh
-                    sh 'cp -f "$SECRET_ENV" .env'
+                    sh "cp -f \$SECRET_ENV ${WS_PATH}/.env"
                 }
             }
         }
-        stage('Build Image') {
-            when {
-                anyOf {
-                    changeset "requirements.txt"
-                    changeset "Dockerfile"
-                    expression { sh(script: "docker images -q ${DOCKER_IMAGE} == ''", returnStatus: true) == 0 }
+        stage('Build & Deploy') {
+            steps {
+                dir("${WS_PATH}") {
+                    echo "📦 Building and Restarting..."
+                    sh "docker build --network=host -t ${DOCKER_IMAGE} ."
+                    
+                    // We use the absolute path for the volume mapping to be 100% safe
+                    sh "DOCKER_IMAGE=${DOCKER_IMAGE} WS_PATH=${WS_PATH} docker compose up -d --remove-orphans"
+                    sh "docker compose restart dashboard trading-bot"
                 }
             }
-            steps {
-                echo "📦 Building Docker Image..."
-                sh "docker build --network=host -t ${DOCKER_IMAGE} ."
-            }
-        }
-        stage('Deploy & Refresh') {
-            steps {
-                echo "🚀 Deploying Logic..."
-                sh "docker compose up -d --remove-orphans"
-                // Forces the bot to reload the python code from the bind mount
-                sh "docker compose restart trading-bot"
-                sh "sleep 5"
-                // Check if heart is alive before tuning
-                sh "docker exec algo_heart python src/tuner.py"
-            }
-        }
-    }
-    post {
-        always {
-            // Reclaim space immediately after every build
-            sh "docker image prune -f"
         }
     }
 }
