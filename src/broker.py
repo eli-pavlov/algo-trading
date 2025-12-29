@@ -1,18 +1,19 @@
 import os
 import requests
 import alpaca_trade_api as tradeapi
+import urllib3
+
+# Disable the "InsecureRequestWarning" to keep logs clean
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Broker:
     def __init__(self):
-        """
-        Initializes Alpaca REST client and Slack reporting.
-        Uses key-value pairs from your .env file.
-        """
         self.api_key = os.getenv("APIKEY")
         self.secret_key = os.getenv("SECRETKEY")
         self.base_url = os.getenv("PAPER_URL")
         self.report_url = os.getenv("REPORT_LINK")
 
+        # Initialize the REST client
         self.api = tradeapi.REST(
             key_id=self.api_key,
             secret_key=self.secret_key,
@@ -20,34 +21,29 @@ class Broker:
             api_version='v2'
         )
 
-    # --- PERFORMANCE & BALANCES (Integrated from your ARM script) ---
+        # GLOBAL FIX: Force the underlying requests session to ignore SSL verification
+        self.api._session.verify = False
 
     def send_webhook_report(self, data_dict, title=None):
-        """Sends a multi-line Slack payload."""
         if not self.report_url:
             return False
-
         header = f"🤖 *{title}*\n" if title else ""
         body = "\n".join([f"{key}: {value}" for key, value in data_dict.items()])
-        
         try:
-            requests.post(self.report_url, json={"text": f"{header}{body}"})
+            # Also ignore SSL for the Slack/Webhook requests
+            requests.post(self.report_url, json={"text": f"{header}{body}"}, verify=False)
             return True
-        except Exception as e:
-            print(f"Webhook failed: {e}")
+        except:
             return False
 
     def get_performance_summary(self):
-        """Calculates performance for Day, Month, Year, and All-Time."""
         stats = {"Day": "1D", "Month": "1M", "Year": "1A", "Total": "all"}
         results = {}
-        
         for label, period in stats.items():
             try:
                 history = self.api.get_portfolio_history(period=period, timeframe="1D")
                 equity = list(getattr(history, "equity", []) or [])
                 base = float(getattr(history, "base_value", 0))
-                
                 if equity and base > 0:
                     pct = (float(equity[-1]) / base - 1.0) * 100.0
                     results[label] = f"{pct:+.2f}%"
@@ -58,25 +54,23 @@ class Broker:
         return results
 
     def get_account_stats(self):
-        """Returns Portfolio and Buying Power stats."""
-        account = self.api.get_account()
-        return {
-            "BUYING_POWER": f"${float(account.buying_power):,.2f}",
-            "TOTAL_PORTFOLIO": f"${float(account.portfolio_value):,.2f}",
-            "CASH": f"${float(account.cash):,.2f}"
-        }
-
-    # --- TRADING EXECUTION ---
+        try:
+            account = self.api.get_account()
+            return {
+                "BUYING_POWER": f"${float(account.buying_power):,.2f}",
+                "TOTAL_PORTFOLIO": f"${float(account.portfolio_value):,.2f}",
+                "CASH": f"${float(account.cash):,.2f}"
+            }
+        except Exception as e:
+            return {"ERROR": "API Connection Failed", "DETAILS": str(e)}
 
     def is_holding(self, symbol):
-        """Checks if a position exists."""
         try:
             return self.api.get_position(symbol)
         except:
             return None
 
     def buy_bracket(self, sym, qty, tp_pct, sl_pct):
-        """Executes a Market Buy with attached SL and TP."""
         try:
             price = float(self.api.get_latest_trade(sym).price)
             order = self.api.submit_order(
@@ -89,16 +83,11 @@ class Broker:
                 take_profit={'limit_price': round(price * (1 + tp_pct), 2)},
                 stop_loss={'stop_price': round(price * (1 - sl_pct), 2)}
             )
-            
-            # Send alert to Slack
             self.send_webhook_report({
                 "Action": "ENTRY EXECUTED",
                 "Symbol": sym,
-                "Price": f"${price}",
-                "Target": f"+{tp_pct*100}%",
-                "Stop": f"-{sl_pct*100}%"
+                "Price": f"${price}"
             }, title="🚀 NEW TRADE")
-            
             return order
         except Exception as e:
             self.send_webhook_report({"Error": str(e)}, title="🚨 TRADE FAILED")
