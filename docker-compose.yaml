@@ -1,11 +1,21 @@
 services:
+  trading-bot:
+    image: ${DOCKER_IMAGE:-algo-trader}
+    container_name: algo_heart
+    volumes:
+      - "${WORKSPACE}/data:/app/data"
+      - "${WORKSPACE}/src:/app/src"
+      - "${WORKSPACE}/config:/app/config" # <--- ENSURE THIS IS HERE
+    network_mode: "host"
+    env_file: .env
+
   dashboard:
     image: ${DOCKER_IMAGE:-algo-trader}
     container_name: algo_ui
     volumes:
-      - "/var/lib/jenkins/workspace/Alpaca Paper Trading/data:/app/data"
-      - "/var/lib/jenkins/workspace/Alpaca Paper Trading/src:/app/src"
-      - "/var/lib/jenkins/workspace/Alpaca Paper Trading/config:/app/config"
+      - "${WORKSPACE}/data:/app/data"
+      - "${WORKSPACE}/src:/app/src"
+      - "${WORKSPACE}/config:/app/config" # <--- ADD THIS TO THE UI SERVICE
     network_mode: "host"
     env_file: .env
     command: streamlit run src/dashboard.py --server.port=8501
