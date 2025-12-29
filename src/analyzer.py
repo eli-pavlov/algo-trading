@@ -1,28 +1,27 @@
 import os
 import yfinance as yf
-import pandas_ta_classic as ta  # <-- CHANGE THIS LINE
+import pandas_ta_classic as ta  # Correct import for the classic library
 import optuna
 import urllib3
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
-# Disable SSL warnings for yfinance and Alpaca
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
 def objective(trial, df):
-    """Optuna objective to maximize profit in a 1-year backtest."""
     adx_threshold = trial.suggest_int("adx_trend", 15, 35)
     rsi_threshold = trial.suggest_int("rsi_trend", 40, 65)
     tp = trial.suggest_float("target", 0.10, 0.40)
     sl = trial.suggest_float("stop", 0.03, 0.15)
 
     df_copy = df.copy()
-    adx_df = df_copy.ta.adx(length=14)
+    # Using the standard ta function call
+    adx_df = ta.adx(df_copy['High'], df_copy['Low'], df_copy['Close'], length=14)
     adx_col = [col for col in adx_df.columns if 'ADX' in col][0]
     df_copy['ADX'] = adx_df[adx_col]
-    df_copy['RSI'] = df_copy.ta.rsi(length=14)
+    df_copy['RSI'] = ta.rsi(df_copy['Close'], length=14)
 
     score, in_pos, entry = 0, False, 0
     for i in range(1, len(df_copy)):
@@ -41,9 +40,7 @@ def objective(trial, df):
 
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
-    # yfinance uses requests internally; we hope it respects the system's SSL state
     df = yf.download(symbol, period="1y", interval="1h", progress=False)
-
     if df.empty:
         print(f"❌ No data for {symbol}")
         return
@@ -51,17 +48,12 @@ def optimize_stock(symbol, broker):
     study = optuna.create_study(direction="maximize")
     study.optimize(lambda trial: objective(trial, df), n_trials=20)
     
-    print(f"✅ Best for {symbol}: {study.best_params}")
-    
-    # Check if we are currently holding to update database state
     is_holding = broker.is_holding(symbol)
     save_strategy(symbol, study.best_params, is_holding is not None)
 
 if __name__ == "__main__":
     init_db()
-    # Initialize broker with SSL bypass
     broker = Broker()
-    
     for t in TICKERS:
         try:
             optimize_stock(t, broker)
