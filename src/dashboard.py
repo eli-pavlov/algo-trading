@@ -14,7 +14,7 @@ st.markdown("""
 <style>
     /* 3D Button Styling */
     div.stButton > button {
-        box-shadow: 0px 4px 0px #4a5568; /* The "3D" shadow */
+        box-shadow: 0px 4px 0px #4a5568; 
         transition: all 0.1s;
         border: 1px solid #cbd5e0;
         border-radius: 8px;
@@ -23,8 +23,8 @@ st.markdown("""
     }
     
     div.stButton > button:active {
-        transform: translateY(4px); /* Push down effect */
-        box-shadow: 0px 0px 0px #4a5568; /* Shadow disappears */
+        transform: translateY(4px); 
+        box-shadow: 0px 0px 0px #4a5568;
     }
 
     div.stButton > button:hover {
@@ -43,8 +43,8 @@ st.markdown("""
 
     /* Paper Trading Warning Badge */
     .paper-badge {
-        background-color: #fffbeb; /* Light yellow */
-        color: #b7791f; /* Dark yellow text */
+        background-color: #fffbeb; 
+        color: #b7791f; 
         padding: 8px;
         border-radius: 6px;
         border: 2px dashed #ecc94b;
@@ -54,6 +54,12 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 1px;
         font-size: 0.85rem;
+    }
+    
+    /* Strategy Row Styling */
+    .strategy-row {
+        padding: 8px 0;
+        border-bottom: 1px solid #eee;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -82,7 +88,7 @@ with st.sidebar:
     hist = broker.get_portfolio_history_stats()
     st.metric("Total Equity", f"${acc.get('Equity', 0):,.2f}")
     
-    # RESTORED: 4-Grid Layout for Timeframes
+    # 4-Grid Layout for Timeframes
     c1, c2 = st.columns(2)
     c1.caption("1 Day"); c1.write(hist.get('1D', 'N/A'))
     c2.caption("1 Week"); c2.write(hist.get('1W', 'N/A'))
@@ -93,7 +99,6 @@ with st.sidebar:
     
     st.markdown("---")
     engine_on = get_status("engine_running") == "1"
-    # Button styling handles the look; logic handles the action
     if st.button("🛑 STOP ENGINE" if engine_on else "🚀 START ENGINE", use_container_width=True):
         update_status("engine_running", "0" if engine_on else "1")
         st.rerun()
@@ -115,7 +120,6 @@ with tab_assets:
         if positions:
             for p in positions:
                 pl_total = float(p.unrealized_pl)
-                # Use columns inside expander header for cleaner look
                 with st.expander(f"{p.symbol} | {p.qty} sh | P/L: ${pl_total:.2f}"):
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Price", f"${float(p.current_price):.2f}")
@@ -132,7 +136,7 @@ with tab_assets:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 2: STRATEGIES (Compact & Clean) ---
+# --- TAB 2: STRATEGIES ---
 with tab_strat:
     with sqlite3.connect(DB_PATH) as conn:
         try:
@@ -145,7 +149,7 @@ with tab_strat:
                 h3.markdown("<small>ADX Min</small>", unsafe_allow_html=True)
                 h4.markdown("<small>Take Profit</small>", unsafe_allow_html=True)
                 h5.markdown("<small>Stop Loss</small>", unsafe_allow_html=True)
-                h6.markdown("") # Action placeholder
+                h6.markdown("") 
                 st.divider()
 
                 for index, row in df.iterrows():
@@ -157,17 +161,17 @@ with tab_strat:
                         # Symbol
                         c1.markdown(f"**{row['symbol']}**")
                         
-                        # Metrics (Small text)
+                        # Metrics 
                         c2.markdown(f"<small>{p.get('rsi_trend', '-')}</small>", unsafe_allow_html=True)
                         c3.markdown(f"<small>{p.get('adx_trend', '-')}</small>", unsafe_allow_html=True)
                         
-                        # Percentages colored
+                        # Percentages 
                         tp = p.get('target', 0) * 100
                         sl = p.get('stop', 0) * 100
                         c4.markdown(f"<span style='color:green; font-weight:bold'>+{tp:.1f}%</span>", unsafe_allow_html=True)
                         c5.markdown(f"<span style='color:red; font-weight:bold'>-{sl:.1f}%</span>", unsafe_allow_html=True)
                         
-                        # Delete (Icon only button)
+                        # Delete
                         if c6.button("🗑️", key=f"del_{row['symbol']}", help="Remove Strategy"):
                             delete_strategy(row['symbol'])
                             st.toast(f"Removed {row['symbol']}")
@@ -177,38 +181,49 @@ with tab_strat:
                     except:
                         c2.warning("Error")
                     
-                    st.markdown("<hr style='margin: 5px 0; border-top: 1px solid #eee;'>", unsafe_allow_html=True)
+                    st.markdown("<div class='strategy-row'></div>", unsafe_allow_html=True)
 
             else:
                 st.info("No strategies active. Run the scanner to populate.")
         except Exception as e:
             st.error(f"DB Error: {e}")
 
-# --- TAB 3: MANUAL ---
+# --- TAB 3: MANUAL CONTROL (Restored Distinct Inputs) ---
 with tab_manual:
+    st.subheader("🕹️ Manual Trade Ticket")
+    
     with st.form("manual_trade"):
-        st.subheader("Manual Trade Execution")
-        c1, c2, c3 = st.columns(3)
+        # Top Row: Basic Info
+        c1, c2, c3, c4 = st.columns(4)
         sym = c1.text_input("Symbol", "TSLA").upper()
         qty = c2.number_input("Qty", 0.1, 10000.0, 1.0)
         side = c3.selectbox("Side", ["buy", "sell"])
+        type = c4.selectbox("Order Type", ["market", "limit", "stop", "stop_limit", "trailing_stop"])
         
-        c4, c5 = st.columns(2)
-        type = c4.selectbox("Type", ["market", "limit", "stop", "trailing_stop"])
-        px = c5.number_input("Price / Trail %", 0.0)
+        st.markdown("---")
         
-        if st.form_submit_button("🚀 Submit Order"):
-            l_px = px if type == 'limit' else None
-            s_px = px if type == 'stop' else None
-            t_pct = px if type == 'trailing_stop' else None
+        # Bottom Row: Advanced Inputs (Clearly Separated)
+        st.caption("Order Details (Fill based on Order Type)")
+        c5, c6, c7 = st.columns(3)
+        limit_px = c5.number_input("Limit Price ($)", 0.0, help="Required for Limit and Stop-Limit orders")
+        stop_px = c6.number_input("Stop Price ($)", 0.0, help="Required for Stop and Stop-Limit orders")
+        trail_pct = c7.number_input("Trail Percent (%)", 0.0, help="Required for Trailing Stop orders")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        if st.form_submit_button("🚀 Submit Order", type="primary"):
+            # Logic to filter inputs
+            l_px = limit_px if type in ['limit', 'stop_limit'] else None
+            s_px = stop_px if type in ['stop', 'stop_limit'] else None
+            t_pct = trail_pct if type == 'trailing_stop' else None
             
             ok, msg = broker.submit_manual_order(sym, qty, side, type, l_px, s_px, t_pct)
             if ok: 
-                st.success(msg)
+                st.success(f"✅ {msg}")
                 time.sleep(1)
                 st.rerun()
             else: 
-                st.error(msg)
+                st.error(f"❌ {msg}")
 
 # --- TAB 4: DEBUG ---
 with tab_debug:
