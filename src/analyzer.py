@@ -1,49 +1,35 @@
-import yfinance as yf
-import pandas_ta as ta  # This now points to pandas-ta-classic
-import optuna
 import os
-from src.database import save_strategy
+import yfinance as yf
+import pandas_ta as ta
+import optuna
+import urllib3
+from src.database import save_strategy, init_db
 from src.broker import Broker
 
-# Configuration for optimization
+# Disable SSL warnings for yfinance and Alpaca
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
-
 def objective(trial, df):
-    """
-    Optuna objective function: Simulates trading with different 
-    parameters to maximize profit.
-    """
-    # Parameter Search Space
+    """Optuna objective to maximize profit in a 1-year backtest."""
     adx_threshold = trial.suggest_int("adx_trend", 15, 35)
     rsi_threshold = trial.suggest_int("rsi_trend", 40, 65)
     tp = trial.suggest_float("target", 0.10, 0.40)
     sl = trial.suggest_float("stop", 0.03, 0.15)
 
-    # Calculate indicators using pandas_ta extensions
-    # We use the copy to avoid modifying the original dataframe
     df_copy = df.copy()
     adx_df = df_copy.ta.adx(length=14)
-    
-    # Handle different column names produced by pandas_ta
     adx_col = [col for col in adx_df.columns if 'ADX' in col][0]
     df_copy['ADX'] = adx_df[adx_col]
     df_copy['RSI'] = df_copy.ta.rsi(length=14)
 
-    # Fast Backtest Simulation
-    score = 0
-    in_pos = False
-    entry = 0
-
+    score, in_pos, entry = 0, False, 0
     for i in range(1, len(df_copy)):
         price = df_copy['Close'].iloc[i]
-        curr_adx = df_copy['ADX'].iloc[i]
-        curr_rsi = df_copy['RSI'].iloc[i]
-
         if not in_pos:
-            if curr_adx > adx_threshold and curr_rsi > rsi_threshold:
-                entry = price
-                in_pos = True
+            if df_copy['ADX'].iloc[i] > adx_threshold and df_copy['RSI'].iloc[i] > rsi_threshold:
+                entry, in_pos = price, True
         else:
             if price >= entry * (1 + tp):
                 score += tp
@@ -51,38 +37,33 @@ def objective(trial, df):
             elif price <= entry * (1 - sl):
                 score -= sl
                 in_pos = False
-
     return score
 
-
-def optimize_stock(symbol):
-    print(f"🧠 Optimizing intelligence for: {symbol}")
-    # Download 1 year of data for deep learning
+def optimize_stock(symbol, broker):
+    print(f"🕵️ Analyzing {symbol}...")
+    # yfinance uses requests internally; we hope it respects the system's SSL state
     df = yf.download(symbol, period="1y", interval="1h", progress=False)
 
     if df.empty:
-        print(f"⚠️ No data for {symbol}")
+        print(f"❌ No data for {symbol}")
         return
 
-    # Create Optuna study
     study = optuna.create_study(direction="maximize")
-    study.optimize(lambda trial: objective(trial, df), n_trials=30)
-
-    best_params = study.best_params
-    print(f"✅ Optimization complete. Best settings: {best_params}")
-
-    # Save to SQLite so main.py can pick them up
-    broker = Broker()
-    save_strategy(symbol, best_params, broker.is_holding(symbol))
-
+    study.optimize(lambda trial: objective(trial, df), n_trials=20)
+    
+    print(f"✅ Best for {symbol}: {study.best_params}")
+    
+    # Check if we are currently holding to update database state
+    is_holding = broker.is_holding(symbol)
+    save_strategy(symbol, study.best_params, is_holding is not None)
 
 if __name__ == "__main__":
-    # Ensure database is ready
-    from src.database import init_db
     init_db()
+    # Initialize broker with SSL bypass
+    broker = Broker()
     
-    for ticker in TICKERS:
+    for t in TICKERS:
         try:
-            optimize_stock(ticker)
+            optimize_stock(t, broker)
         except Exception as e:
-            print(f"❌ Failed to optimize {ticker}: {e}")
+            print(f"⚠️ Error on {t}: {e}")

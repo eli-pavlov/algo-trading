@@ -5,9 +5,7 @@ pipeline {
     }
     stages {
         stage('Checkout') {
-            steps {
-                checkout scm
-            }
+            steps { checkout scm }
         }
         stage('Prepare Secrets') {
             steps {
@@ -18,9 +16,17 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                // Use --no-cache once to clear out the broken pandas_ta attempts
-                sh "docker compose build --no-cache"
+                // 1. Build the images
+                sh "docker compose build"
+                
+                // 2. Start the containers
                 sh "docker compose up -d"
+                
+                // 3. WAIT & RETRAIN (Run Analyzer inside the active container)
+                // We run it as a background-safe command to ensure DB is populated
+                sh "docker exec algo_heart python src/analyzer.py"
+                
+                // 4. Cleanup old images
                 sh "docker image prune -f"
             }
         }
