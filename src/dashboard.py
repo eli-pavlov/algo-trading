@@ -74,6 +74,33 @@ with t1: # ASSETS
                 c3.metric("Value", f"${float(p.market_value):,.2f}")
     else: st.info("No active positions.")
 
+with t2: # ⚙️ STRATEGIES
+    st.subheader("Active Strategy Configurations")
+    yaml_path = "config/strategies.yaml"
+    
+    if os.path.exists(yaml_path):
+        with open(yaml_path, "r") as f:
+            config = yaml.safe_load(f)
+            strats = config.get('strategies', {})
+        
+        if strats:
+            # Create a clean dataframe for display
+            display_data = []
+            for ticker, params in strats.items():
+                display_data.append({
+                    "Ticker": ticker,
+                    "Enabled": "✅" if params.get('enabled') else "❌",
+                    "Timeframe": params.get('timeframe'),
+                    "Qty": params.get('qty'),
+                    "RSI Panic": params.get('rsi_panic_threshold'),
+                    "Trail %": f"{params.get('trail_pct', 0)*100:.0f}%"
+                })
+            st.table(pd.DataFrame(display_data))
+        else:
+            st.warning("No strategies defined in YAML.")
+    else:
+        st.error(f"Config file not found at {yaml_path}. Check Docker mounts.")
+
 with t3: # FULL MANUAL TICKET
     st.subheader("🕹️ Advanced Manual Ticket")
     with st.form("manual_trade"):

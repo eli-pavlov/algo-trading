@@ -28,15 +28,14 @@ pipeline {
         stage('Build & Deploy') {
             steps {
                 echo "📦 Building and Refreshing..."
-                // Passing environment variables to docker compose
-                sh """
-                    export DOCKER_IMAGE=${DOCKER_IMAGE}
-                    export WORKSPACE='${WORKSPACE}'
-                    docker compose up -d --build --remove-orphans
-                """
-                sh "docker compose restart dashboard trading-bot"
-                sh "sleep 5"
-                sh "docker exec algo_heart python src/tuner.py"
+                // Use 'dir' to set the execution context to the workspace
+                dir("${WORKSPACE}") {
+                    sh """
+                        export DOCKER_IMAGE=${DOCKER_IMAGE}
+                        docker compose up -d --build --remove-orphans
+                    """
+                    sh "docker compose restart dashboard trading-bot"
+                }
             }
         }
     }

@@ -3,9 +3,9 @@ services:
     image: ${DOCKER_IMAGE:-algo-trader}
     container_name: algo_heart
     volumes:
-      - "${WORKSPACE}/data:/app/data"
-      - "${WORKSPACE}/src:/app/src"
-      - "${WORKSPACE}/config:/app/config"
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./config:/app/config     # Relative path is safer here
     network_mode: "host"
     env_file: .env
 
@@ -13,8 +13,9 @@ services:
     image: ${DOCKER_IMAGE:-algo-trader}
     container_name: algo_ui
     volumes:
-      - "${WORKSPACE}/data:/app/data"
-      - "${WORKSPACE}/src:/app/src"
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./config:/app/config     # Added this mount to the UI
     network_mode: "host"
     env_file: .env
     command: streamlit run src/dashboard.py --server.port=8501
