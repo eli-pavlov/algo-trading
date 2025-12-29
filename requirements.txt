@@ -3,7 +3,7 @@ krakenex
 pykrakenapi
 yfinance
 pandas
-pandas_ta
+ta
 numpy
 python-dotenv
 pyyaml

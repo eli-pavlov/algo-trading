@@ -2,7 +2,9 @@ import schedule
 import time
 import os
 import yfinance as yf
-# Using absolute imports for Docker compatibility
+# Import specific indicators from the 'ta' library
+from ta.trend import ADXIndicator
+from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies
 from src.broker import Broker
 
@@ -33,11 +35,15 @@ def heart_beat():
             if df.empty:
                 continue
 
-            # Indicators logic
-            adx = df.ta.adx().iloc[-1]['ADX_14']
-            rsi = df.ta.rsi().iloc[-1]
+            # Calculate Indicators using 'ta' library
+            adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+            rsi_gen = RSIIndicator(close=df['Close'], window=14)
+            
+            current_adx = adx_gen.adx().iloc[-1]
+            current_rsi = rsi_gen.rsi().iloc[-1]
 
-            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
+            # Strategy Logic
+            if current_adx > p.get('adx_trend', 25) and current_rsi > p.get('rsi_trend', 50):
                 broker.buy_bracket(
                     sym, 
                     qty=1, 
@@ -50,7 +56,6 @@ if __name__ == "__main__":
     print("🚀 Algo-Trading Machine Active...")
 
     schedule.every(1).minutes.do(heart_beat)
-    # Set to 16:00 (4 PM) EST or your preferred time
     schedule.every().day.at("21:00").do(daily_summary)
 
     while True:
