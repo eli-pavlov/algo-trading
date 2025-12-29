@@ -103,35 +103,32 @@ with t4: # PERSISTENT EXECUTION
             st.dataframe(df, use_container_width=True, height=450)
         except: st.info("No records found.")
 
-with t5: # ADVANCED DEBUG
+with t5: # Diagnostics Tab
     st.header("🔍 System Diagnostics")
-    r1, r2, r3 = st.columns(3)
     
-    # Resource Monitor
+    # 1. Physical Resource Gauges
+    r1, r2, r3 = st.columns(3)
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-    r1.metric("RAM Usage", f"{mem.percent}%", f"{mem.used//1024**2}MB")
-    r2.metric("Disk Free", f"{disk.free//1024**3}GB", f"{disk.percent}% Used")
     
-    # Latency Calculation
+    # RAM
+    r1.metric("RAM Usage", f"{mem.percent}%", f"{mem.used//1024**2}MB Used")
+    
+    # DISK (The "Nuke" Indicator)
+    disk_color = "normal" if disk.percent < 85 else "inverse"
+    r2.metric("Disk Space", f"{disk.free//1024**3}GB Free", f"{disk.percent}% Used", delta_color=disk_color)
+    
+    # LATENCY
     avg_lat = broker.get_mean_latency_24h()
     r3.metric("Avg Latency (24h)", f"{avg_lat:.1f}ms")
 
     st.divider()
-    st.subheader("2. API Routing Logic")
     
-    # Show exactly what the broker is using right now
+    # 2. Key Check & Endpoint Status
+    st.subheader("2. API Routing Logic")
     act_key, _, is_paper = Config.get_auth()
     st.markdown(f"""<div class="debug-card">
         <b>Active Mode:</b> {Config.MODE}<br>
         <b>In-Use Key:</b> {act_key[:4]}...{act_key[-4:]}<br>
         <b>Target Endpoint:</b> {"Paper Simulator" if is_paper else "Live Exchange"}
     </div>""", unsafe_allow_html=True)
-    
-    with st.expander("Show Raw Environment Fallback Check"):
-        def mask(k): 
-            v = os.getenv(k)
-            return f"✅ {v[:4]}..." if v else "❌ Missing"
-        st.write(f"API_LIVE: {mask('APIKEY_LIVE')}")
-        st.write(f"API_PAPER: {mask('APIKEY_PAPER')}")
-        st.write(f"API_MAIN (Fallback Source): {mask('APIKEY')}")
