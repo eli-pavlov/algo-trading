@@ -1,64 +1,23 @@
 ﻿pipeline {
     agent any
-    
     environment {
         DOCKER_IMAGE = "algo-trader"
     }
-
     stages {
-        stage('Build') {
+        stage('Quality Gate') {
             steps {
-                sh 'docker build -t ${DOCKER_IMAGE}:${BRANCH_NAME} .'
+                sh 'pip install flake8 && flake8 src/'
             }
         }
-
-        stage('Deploy Staging') {
-            when { branch 'dev' }
+        stage('Build Image') {
             steps {
-                withCredentials([string(credentialsId: 'alpaca-paper-key', variable: 'KEY'),
-                                 string(credentialsId: 'alpaca-paper-secret', variable: 'SECRET')]) {
-                    sh '''
-                        docker stop bot-staging || true
-                        docker rm bot-staging || true
-                        docker run -d --name bot-staging --restart always \
-                            -e ALPACA_API_KEY=$KEY \
-                            -e ALPACA_SECRET_KEY=$SECRET \
-                            -e ALPACA_BASE_URL="https://paper-api.alpaca.markets" \
-                            -e TRADING_MODE="PAPER" \
-                            -e DB_PATH="/app/data/trading.db" \
-                            -e YF_CACHE_PATH="/app/cache/yfinance" \
-                            -v $PWD/config:/app/config \
-                            -v $PWD/data:/app/data \
-                            -v $PWD/cache:/app/cache \
-                            -v $PWD/logs:/app/logs \
-                            ${DOCKER_IMAGE}:${BRANCH_NAME}
-                    '''
-                }
+                sh "docker compose build"
             }
         }
-
-        stage('Deploy Production') {
-            when { branch 'main' }
+        stage('Deploy') {
             steps {
-                withCredentials([string(credentialsId: 'alpaca-live-key', variable: 'KEY'),
-                                 string(credentialsId: 'alpaca-live-secret', variable: 'SECRET')]) {
-                    sh '''
-                        docker stop bot-prod || true
-                        docker rm bot-prod || true
-                        docker run -d --name bot-prod --restart always \
-                            -e ALPACA_API_KEY=$KEY \
-                            -e ALPACA_SECRET_KEY=$SECRET \
-                            -e ALPACA_BASE_URL="https://api.alpaca.markets" \
-                            -e TRADING_MODE="LIVE" \
-                            -e DB_PATH="/app/data/trading.db" \
-                            -e YF_CACHE_PATH="/app/cache/yfinance" \
-                            -v $PWD/config:/app/config \
-                            -v $PWD/data:/app/data \
-                            -v $PWD/cache:/app/cache \
-                            -v $PWD/logs:/app/logs \
-                            ${DOCKER_IMAGE}:${BRANCH_NAME}
-                    '''
-                }
+                // Restarts the bot and UI with the new code
+                sh "docker compose up -d"
             }
         }
     }
