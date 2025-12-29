@@ -63,21 +63,22 @@ def objective(trial, df):
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
     
-    # FIX: Initialize df here so it exists in the outer scope for the linter
-    df = pd.DataFrame()
-    
+    # 1. Download Data - OUTSIDE the main try block so 'df' is defined in scope
     try:
-        # Download data with threads=False to prevent CFFI/Curl crashes on ARM
         df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False)
+    except Exception as e:
+        print(f"❌ Download failed for {symbol}: {e}")
+        return
 
-        if df.empty:
-            print(f"❌ No data for {symbol}")
-            return
+    if df.empty:
+        print(f"❌ No data for {symbol}")
+        return
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
-        # Optimize with fewer trials to save RAM
+    # 2. Optimize - Inside its own try block, but 'df' is now safe to use
+    try:
         study = optuna.create_study(direction="maximize")
         study.optimize(lambda trial: objective(trial, df), n_trials=5)
 
@@ -92,7 +93,7 @@ def optimize_stock(symbol, broker):
         gc.collect()
 
     except Exception as e:
-        print(f"⚠️ Error on {symbol}: {e}")
+        print(f"⚠️ Optimization error on {symbol}: {e}")
 
 
 if __name__ == "__main__":
