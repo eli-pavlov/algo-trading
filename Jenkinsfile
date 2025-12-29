@@ -2,7 +2,6 @@ pipeline {
     agent {
         node {
             label 'built-in'
-            // FORCES a fixed, clean path on your OCI disk
             customWorkspace '/home/opc/algo-deploy'
         }
     }
@@ -13,13 +12,13 @@ pipeline {
     stages {
         stage('Initialize') {
             steps {
-                echo "🚀 Initializing Fixed Workspace at ${DEPLOY_PATH}"
+                echo "🚀 Preparing Workspace..."
                 checkout scm
                 
-                // Fix the root-owned folders from previous manual runs
+                // Ensure permissions are always correct at start
                 sh "sudo chown -R jenkins:jenkins ${DEPLOY_PATH}"
                 
-                echo "🧹 Pre-build cleanup..."
+                echo "🧹 Cleaning Docker artifacts..."
                 sh "docker builder prune -f"
                 sh "docker image prune -f"
             }
@@ -34,26 +33,22 @@ pipeline {
         stage('Build & Deploy') {
             steps {
                 echo "📦 Building and Refreshing Containers..."
-                // Build the image
                 sh "docker build --network=host -t ${DOCKER_IMAGE} ."
-                
-                // Deploy using the fixed path for volumes
                 sh "docker compose up -d --remove-orphans"
-                
-                // Force reload of Python files from the fixed mount
                 sh "docker compose restart dashboard trading-bot"
-            }
-        }
-        stage('Post-Deploy Tuning') {
-            steps {
-                echo "🎯 Running Strategy Tuner..."
-                sh "docker exec algo_heart python src/tuner.py"
             }
         }
     }
     post {
         always {
-            sh "docker image prune -f"
+            // Scripting inside post always needs to be wrapped in script block or be simple
+            script {
+                try {
+                    sh "docker image prune -f"
+                } catch (Exception e) {
+                    echo "Cleanup skipped: ${e.message}"
+                }
+            }
         }
     }
 }
