@@ -3,6 +3,7 @@ krakenex
 pykrakenapi
 yfinance
 pandas
+pandas_ta
 numpy
 python-dotenv
 pyyaml
@@ -12,3 +13,5 @@ schedule
 streamlit
 pytest
 flake8
+optuna
+scikit-learn
