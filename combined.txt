@@ -67,48 +67,51 @@ market_scanner.*
 // docker-compose.yaml
 services:
   trading-bot:
-    build:
-      context: .
+    image: algo-trader-image
     container_name: algo_heart
     restart: always
     env_file: .env
+    network_mode: "host"
     volumes:
       - ./data:/app/data
-    healthcheck:
-      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
-      interval: 1m
-      retries: 3
 
   dashboard:
-    build:
-      context: .
+    image: algo-trader-image
     container_name: algo_ui
-    ports:
-      - "8501:8501"
+    restart: always
+    network_mode: "host"
     env_file: .env
     volumes:
       - ./data:/app/data
+    # Note: ports mapping is ignored in network_mode: host; 
+    # Streamlit will naturally be available on 8501
     command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
 
 // Dockerfile
-FROM python:3.9-slim
+FROM python:3.9-slim as builder
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y gcc g++ ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-# Use extra trusted-host flags and a longer timeout
-RUN pip install --no-cache-dir \
-    --timeout 100 \
+# Use a specific index URL and bypass SSL checks completely
+RUN pip install --user --no-cache-dir \
+    --index-url https://pypi.org/simple \
     --trusted-host pypi.org \
-    --trusted-host pypi.python.org \
     --trusted-host files.pythonhosted.org \
+    --trusted-host pypi.python.org \
+    -r requirements.txt || \
+    pip install --user --no-cache-dir \
+    --index-url http://pypi.doubleu.top/simple \
+    --trusted-host pypi.doubleu.top \
     -r requirements.txt
 
+FROM python:3.9-slim
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
 COPY . .
-ENV PYTHONPATH=/app
+ENV PATH=/root/.local/bin:$PATH PYTHONPATH=/app PYTHONUNBUFFERED=1
 CMD ["python", "src/main.py"]
 
 // Jenkinsfile
@@ -130,17 +133,19 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                // 1. Build the images
-                sh "docker compose build"
-                
+                // 1. Manually build the image using the host network (the part that worked manually)
+                // We tag it as 'algo-trader' so docker-compose can find it
+                sh "docker build --network=host -t algo-trader-image . "
+
                 // 2. Start the containers
+                // We use --no-build to ensure it uses the image we just created
                 sh "docker compose up -d"
                 
-                // 3. WAIT & RETRAIN (Run Analyzer inside the active container)
-                // We run it as a background-safe command to ensure DB is populated
+                // 3. RETRAIN
+                sh "sleep 5"
                 sh "docker exec algo_heart python src/analyzer.py"
                 
-                // 4. Cleanup old images
+                // 4. Cleanup
                 sh "docker image prune -f"
             }
         }
@@ -378,9 +383,10 @@ plotly
 // src/analyzer.py
 import os
 import yfinance as yf
-import pandas_ta_classic as ta  # Correct import for the classic library
+import pandas_ta_classic as ta
 import optuna
 import urllib3
+import pandas as pd
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
@@ -389,23 +395,36 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
 def objective(trial, df):
+    """Optuna objective to maximize profit in a 1-year backtest."""
     adx_threshold = trial.suggest_int("adx_trend", 15, 35)
     rsi_threshold = trial.suggest_int("rsi_trend", 40, 65)
     tp = trial.suggest_float("target", 0.10, 0.40)
     sl = trial.suggest_float("stop", 0.03, 0.15)
 
     df_copy = df.copy()
-    # Using the standard ta function call
+    
+    # Calculate ADX safely
+    # pandas-ta-classic requires explicit high, low, close
     adx_df = ta.adx(df_copy['High'], df_copy['Low'], df_copy['Close'], length=14)
-    adx_col = [col for col in adx_df.columns if 'ADX' in col][0]
-    df_copy['ADX'] = adx_df[adx_col]
+    
+    if adx_df is None or adx_df.empty:
+        return -100 # Penalize if indicator fails
+
+    # Merge ADX back into main dataframe
+    df_copy['ADX'] = adx_df.iloc[:, 0] # Use the first column of the ADX result
     df_copy['RSI'] = ta.rsi(df_copy['Close'], length=14)
+    
+    # Drop rows where indicators are NaN (the warm-up period)
+    df_copy = df_copy.dropna(subset=['ADX', 'RSI'])
 
     score, in_pos, entry = 0, False, 0
     for i in range(1, len(df_copy)):
         price = df_copy['Close'].iloc[i]
+        curr_adx = df_copy['ADX'].iloc[i]
+        curr_rsi = df_copy['RSI'].iloc[i]
+
         if not in_pos:
-            if df_copy['ADX'].iloc[i] > adx_threshold and df_copy['RSI'].iloc[i] > rsi_threshold:
+            if curr_adx > adx_threshold and curr_rsi > rsi_threshold:
                 entry, in_pos = price, True
         else:
             if price >= entry * (1 + tp):
@@ -418,14 +437,24 @@ def objective(trial, df):
 
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
+    # 1. Download data
     df = yf.download(symbol, period="1y", interval="1h", progress=False)
+
     if df.empty:
         print(f"❌ No data for {symbol}")
         return
 
+    # 2. Flatten MultiIndex columns if necessary (new yfinance behavior)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    # 3. Optimize
     study = optuna.create_study(direction="maximize")
     study.optimize(lambda trial: objective(trial, df), n_trials=20)
     
+    print(f"✅ Best for {symbol}: {study.best_params}")
+    
+    # 4. Save
     is_holding = broker.is_holding(symbol)
     save_strategy(symbol, study.best_params, is_holding is not None)
 
@@ -443,146 +472,253 @@ import os
 import requests
 import alpaca_trade_api as tradeapi
 import urllib3
+from datetime import datetime, timezone
 
-# Disable SSL warnings for ARM/Docker environments
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Broker:
     def __init__(self):
-        # Explicitly set the Paper URL to avoid Jenkins proxy redirection
         self.base_url = "https://paper-api.alpaca.markets"
         self.api_key = os.getenv("APIKEY")
         self.secret_key = os.getenv("SECRETKEY")
-        self.report_url = os.getenv("REPORT_LINK")
-
-        # Initialize the REST client
+        
         self.api = tradeapi.REST(
             key_id=self.api_key,
             secret_key=self.secret_key,
             base_url=self.base_url,
             api_version='v2'
         )
-
-        # CRITICAL FIXES for Jenkins/ARM/Docker environment:
-        # 1. Ignore system proxies (Jenkins often sets HTTP_PROXY)
         self.api._session.trust_env = False
-        # 2. Bypass SSL verification (fixes expired cert errors in containers)
         self.api._session.verify = False
 
     def test_connection(self):
-        """Perform a raw request to verify connectivity."""
         try:
-            url = f"{self.base_url}/v2/account"
-            headers = {
-                "APCA-API-KEY-ID": self.api_key,
-                "APCA-API-SECRET-KEY": self.secret_key
-            }
-            # Raw request bypassing environment variables
-            resp = requests.get(url, headers=headers, verify=False, timeout=5, proxies={"http": "", "https": ""})
-            if resp.status_code == 200:
-                return True, "🟢 Connected to Alpaca"
-            else:
-                return False, f"🔴 HTTP {resp.status_code}: {resp.text[:100]}"
+            acct = self.api.get_account()
+            return True, f"🟢 Connected (ID: {acct.id})"
         except Exception as e:
-            return False, f"🔴 Connection Failed: {str(e)}"
+            return False, f"🔴 Error: {str(e)}"
+
+    def get_market_clock(self):
+        """Returns market status and time to open/close."""
+        try:
+            clock = self.api.get_clock()
+            now = clock.timestamp.replace(tzinfo=timezone.utc)
+            
+            if clock.is_open:
+                close_time = clock.next_close.replace(tzinfo=timezone.utc)
+                delta = close_time - now
+                msg = f"🟢 Market Open (Closes in {str(delta).split('.')[0]})"
+            else:
+                open_time = clock.next_open.replace(tzinfo=timezone.utc)
+                delta = open_time - now
+                msg = f"🔴 Market Closed (Opens in {str(delta).split('.')[0]})"
+            return msg
+        except:
+            return "🟠 Market Status Unavailable"
+
+    def get_portfolio_history_stats(self):
+        """Fetches 1D, 1W, 1M, 1A performance."""
+        periods = {'1D': '1D', '1W': '1W', '1M': '1M', '1A': '1A'}
+        data = {}
+        for label, p in periods.items():
+            try:
+                # '1A' isn't standard in some versions, defaulting to '1M' if fails
+                hist = self.api.get_portfolio_history(period=p, timeframe="1D")
+                if hist.equity:
+                    start = hist.equity[0]
+                    end = hist.equity[-1]
+                    pct = ((end - start) / start) * 100
+                    data[label] = f"{pct:+.2f}%"
+                else:
+                    data[label] = "0.00%"
+            except:
+                data[label] = "N/A"
+        return data
 
     def get_account_stats(self):
         try:
-            account = self.api.get_account()
+            acc = self.api.get_account()
             return {
-                "BUYING_POWER": f"${float(account.buying_power):,.2f}",
-                "TOTAL_PORTFOLIO": f"${float(account.portfolio_value):,.2f}",
-                "CASH": f"${float(account.cash):,.2f}"
+                "Equity": float(acc.portfolio_value),
+                "Power": float(acc.buying_power),
+                "Cash": float(acc.cash)
             }
-        except Exception as e:
-            return {"ERROR": str(e)}
-
-    def is_holding(self, symbol):
-        try:
-            return self.api.get_position(symbol)
         except:
-            return None
+            return {}
 
+    def get_orders_for_symbol(self, symbol):
+        """Fetches active Stop Loss / Take Profit orders for a symbol."""
+        try:
+            orders = self.api.list_orders(status='open', symbols=[symbol])
+            return [f"{o.type.upper()} {o.side} @ {o.limit_price or o.stop_price}" for o in orders]
+        except:
+            return []
+
+    def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
+        """Handles all API order types."""
+        args = {
+            "symbol": symbol,
+            "qty": qty,
+            "side": side,
+            "type": type,
+            "time_in_force": "gtc"
+        }
+        if type == 'limit': args['limit_price'] = limit_px
+        if type == 'stop': args['stop_price'] = stop_px
+        if type == 'stop_limit':
+            args['stop_price'] = stop_px
+            args['limit_price'] = limit_px
+        if type == 'trailing_stop': args['trail_percent'] = trail_pct
+
+        try:
+            self.api.submit_order(**args)
+            return True, "Order Submitted"
+        except Exception as e:
+            return False, str(e)
+
+    # ... (Keep existing is_holding / sell_all / buy_bracket for the bot logic) ...
+    def is_holding(self, symbol):
+        try: return self.api.get_position(symbol)
+        except: return None
+    
     def sell_all(self, sym):
-        """Liquidates the entire position for a specific symbol."""
         try:
             pos = self.is_holding(sym)
             if pos:
-                self.api.submit_order(
-                    symbol=sym, qty=pos.qty, side='sell', 
-                    type='market', time_in_force='gtc'
-                )
-                return True
-        except:
-            pass
-        return False
+                self.api.submit_order(symbol=sym, qty=pos.qty, side='sell', type='market', time_in_force='gtc')
+        except: pass
 
     def buy_bracket(self, sym, qty, tp_pct, sl_pct):
         try:
             price = float(self.api.get_latest_trade(sym).price)
-            return self.api.submit_order(
-                symbol=sym, qty=qty, side='buy', type='market', 
-                time_in_force='gtc', order_class='bracket',
+            self.api.submit_order(
+                symbol=sym, qty=qty, side='buy', type='market', time_in_force='gtc',
+                order_class='bracket',
                 take_profit={'limit_price': round(price * (1 + tp_pct), 2)},
                 stop_loss={'stop_price': round(price * (1 - sl_pct), 2)}
             )
-        except:
-            return None
+        except: pass
 
 // src/dashboard.py
 import streamlit as st
 import pandas as pd
 import sqlite3
-import os
+import time
 from src.broker import Broker
-from src.database import update_status, get_status, DB_PATH
+from src.database import get_status, update_status, DB_PATH
 
-st.set_page_config(page_title="Algo UI", layout="wide")
+st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
+
+# Initialize Broker
 broker = Broker()
 
-# --- SIDEBAR ---
-st.sidebar.title("📡 System Health")
-connected, msg = broker.test_connection()
+# --- HEADER: Market Clock ---
+st.markdown(f"### 🕒 {broker.get_market_clock()}")
+st.markdown("---")
 
-if connected:
-    st.sidebar.success("API Status: 🟢 ONLINE")
-    acc = broker.get_account_stats()
-    st.sidebar.metric("Portfolio", acc.get('TOTAL_PORTFOLIO', "$0"))
-    st.sidebar.metric("Buying Power", acc.get('BUYING_POWER', "$0"))
-else:
-    st.sidebar.error("API Status: 🔴 DISCONNECTED")
-    st.sidebar.code(msg)
+# --- TOP ROW: Portfolio Performance ---
+col1, col2, col3, col4, col5 = st.columns(5)
+acc = broker.get_account_stats()
+hist = broker.get_portfolio_history_stats()
 
-if st.sidebar.button("Toggle Engine"):
-    curr = get_status("engine_running")
-    update_status("engine_running", "0" if curr == "1" else "1")
-    st.rerun()
+with col1: st.metric("Total Equity", f"${acc.get('Equity', 0):,.2f}")
+with col2: st.metric("Day P/L", hist.get('1D', 'N/A'))
+with col3: st.metric("Week P/L", hist.get('1W', 'N/A'))
+with col4: st.metric("Month P/L", hist.get('1M', 'N/A'))
+with col5: st.metric("Year P/L", hist.get('1A', 'N/A'))
 
-# --- MAIN ---
-st.title("🛡️ Algo Command Center")
-tabs = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Control", "🔍 Debug"])
+# --- MAIN TABS ---
+tab_assets, tab_strat, tab_manual, tab_debug = st.tabs(["📊 Assets & Orders", "⚙️ Strategies", "🕹️ Manual Control", "🔍 Debug"])
 
-with tabs[0]:
-    st.subheader("Holdings")
-    pos = broker.api.list_positions()
-    if pos:
-        st.table(pd.DataFrame([{"Sym": p.symbol, "Qty": p.qty, "Price": p.current_price} for p in pos]))
-    else:
-        st.info("No positions.")
+# 1. ASSETS TAB
+with tab_assets:
+    st.subheader("Active Holdings & Open Orders")
+    try:
+        positions = broker.api.list_positions()
+        if positions:
+            for p in positions:
+                with st.expander(f"{p.symbol} | {p.qty} shares | P/L: ${float(p.unrealized_pl):.2f} ({float(p.unrealized_plpc)*100:.2f}%)"):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.write(f"**Current Price:** ${float(p.current_price):.2f}")
+                    c2.write(f"**Avg Entry:** ${float(p.avg_entry_price):.2f}")
+                    c3.write(f"**Market Value:** ${float(p.market_value):.2f}")
+                    c4.write(f"**Day P/L:** ${float(p.unrealized_intraday_pl):.2f}")
+                    
+                    # Fetch Open Orders for this symbol
+                    open_orders = broker.get_orders_for_symbol(p.symbol)
+                    st.write("---")
+                    st.write("**⚠️ Active Orders (Stop Loss / Take Profit):**")
+                    if open_orders:
+                        for o in open_orders:
+                            st.code(o)
+                    else:
+                        st.caption("No active open orders.")
+        else:
+            st.info("No active positions.")
+    except Exception as e:
+        st.error(f"Error fetching assets: {e}")
 
-with tabs[1]:
-    st.subheader("Logic Settings")
+# 2. STRATEGIES TAB
+with tab_strat:
+    st.subheader("Strategy Parameters")
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql("SELECT * FROM strategies", conn)
-        st.dataframe(df, use_container_width=True)
+        try:
+            df = pd.read_sql("SELECT * FROM strategies", conn)
+            st.dataframe(df, use_container_width=True)
+        except:
+            st.warning("Database empty or locked.")
 
-with tabs[3]:
-    st.subheader("Debug Console")
-    st.write(f"**Target URL:** `{broker.base_url}/v2/account`")
-    st.write(f"**API Key Present:** `{'✅' if broker.api_key else '❌'}`")
-    st.write("---")
-    st.write("**Last Error Message:**")
-    st.error(msg)
+# 3. MANUAL CONTROL TAB (Enhanced)
+with tab_manual:
+    st.subheader("🕹️ Advanced Order Entry")
+    
+    c_sym, c_qty, c_side = st.columns(3)
+    sym = c_sym.text_input("Symbol", "TSLA").upper()
+    qty = c_qty.number_input("Quantity", min_value=0.1, value=1.0)
+    side = c_side.selectbox("Side", ["buy", "sell"])
+    
+    c_type, c_param = st.columns([1, 2])
+    type = c_type.selectbox("Order Type", ["market", "limit", "stop", "stop_limit", "trailing_stop"])
+    
+    # Dynamic inputs based on order type
+    limit_px, stop_px, trail_pct = None, None, None
+    if type == "limit":
+        limit_px = c_param.number_input("Limit Price", min_value=0.01)
+    elif type == "stop":
+        stop_px = c_param.number_input("Stop Price", min_value=0.01)
+    elif type == "stop_limit":
+        col_sl1, col_sl2 = c_param.columns(2)
+        stop_px = col_sl1.number_input("Stop Price", min_value=0.01)
+        limit_px = col_sl2.number_input("Limit Price", min_value=0.01)
+    elif type == "trailing_stop":
+        trail_pct = c_param.number_input("Trail Percent (%)", min_value=0.1, max_value=100.0)
+
+    if st.button("🚀 SUBMIT ORDER", type="primary"):
+        with st.spinner("Transmitting to Alpaca..."):
+            success, msg = broker.submit_manual_order(sym, qty, side, type, limit_px, stop_px, trail_pct)
+            if success:
+                st.success(f"✅ {msg}")
+                time.sleep(1) # Wait for Alpaca to process
+                st.rerun()    # Force UI Refresh
+            else:
+                st.error(f"❌ {msg}")
+
+# 4. DEBUG TAB
+with tab_debug:
+    conn_status, conn_msg = broker.test_connection()
+    st.write(f"**Connection:** {conn_msg}")
+    
+    engine_on = get_status("engine_running") == "1"
+    btn_txt = "🛑 STOP AUTOMATED ENGINE" if engine_on else "♻️ START AUTOMATED ENGINE"
+    if st.button(btn_txt):
+        update_status("engine_running", "0" if engine_on else "1")
+        st.rerun()
+
+# --- SIDEBAR INFO ---
+st.sidebar.title("Overview")
+st.sidebar.info(f"**Buying Power:** ${acc.get('Power', 0):,.2f}")
+st.sidebar.info(f"**Cash:** ${acc.get('Cash', 0):,.2f}")
+st.sidebar.caption("Auto-refreshing on interaction")
 
 // src/database.py
 import sqlite3

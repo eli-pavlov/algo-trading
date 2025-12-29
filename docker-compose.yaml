@@ -1,21 +1,25 @@
+version: '3.8'
 services:
   trading-bot:
-    image: algo-trader-image
+    image: algo-trader  # <--- Uses the pre-built image
     container_name: algo_heart
     restart: always
     env_file: .env
-    network_mode: "host"
+    network_mode: "host" # Bypasses Jenkins/Stapler proxy issues
     volumes:
       - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
+      interval: 1m
+      retries: 3
 
   dashboard:
-    image: algo-trader-image
+    image: algo-trader  # <--- Uses the same pre-built image
     container_name: algo_ui
     restart: always
     network_mode: "host"
     env_file: .env
     volumes:
       - ./data:/app/data
-    # Note: ports mapping is ignored in network_mode: host; 
-    # Streamlit will naturally be available on 8501
+    # Ports are ignored in host mode, but command remains valid
     command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
