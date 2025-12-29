@@ -1,4 +1,6 @@
-import sqlite3, os, json
+import sqlite3
+import os
+import json
 
 DB_PATH = os.getenv("DB_PATH", "data/trading.db")
 
