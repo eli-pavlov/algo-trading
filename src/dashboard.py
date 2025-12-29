@@ -7,9 +7,9 @@ from src.broker import Broker
 from src.config import Config
 from src.database import get_status, update_status, delete_strategy, DB_PATH
 
-# 1. Page Configuration & Compressed UI CSS
-st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Algo Command Center", layout="wide")
 
+# --- COMPRESSED CSS ---
 st.markdown("""
 <style>
     [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
@@ -17,14 +17,13 @@ st.markdown("""
     .stMetric { padding: 0.1rem !important; }
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
     .debug-card { background: #f0f2f6; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 5px;}
-    .sidebar-graph { margin-top: -20px; }
 </style>
 """, unsafe_allow_html=True)
 
 broker = Broker()
 conn_ok, conn_msg = broker.test_connection()
 
-# 2. Sidebar: Portfolio Performance & Graph
+# --- SIDEBAR: Portfolio & Stats ---
 with st.sidebar:
     st.markdown(f"**MODE: {Config.MODE}**")
     if conn_ok:
@@ -33,40 +32,35 @@ with st.sidebar:
         st.metric("Equity", f"${acc.get('Equity', 0):,.0f}")
         st.metric("Power", f"${acc.get('Power', 0):,.0f}")
         
-        # Historical Portfolio Metrics
+        # Portfolio Graph
         st.markdown("---")
-        st.caption("Historical Returns")
-        perf = broker.get_portfolio_history_stats()
-        c1, c2 = st.columns(2)
-        c1.write(f"**1D:** {perf.get('1D','N/A')}")
-        c2.write(f"**1W:** {perf.get('1W','N/A')}")
-        c3, c4 = st.columns(2)
-        c3.write(f"**1M:** {perf.get('1M','N/A')}")
-        c4.write(f"**1Y:** {perf.get('1A','N/A')}")
-
-        # 24H Equity Curve Graph
-        st.markdown("---")
-        st.caption("24H Equity Trend")
+        st.caption("24H Equity Curve")
         try:
             from alpaca.trading.requests import GetPortfolioHistoryRequest
-            hist_req = GetPortfolioHistoryRequest(period="1D", timeframe="15Min")
-            hist = broker.client.get_portfolio_history(hist_req)
+            hist = broker.client.get_portfolio_history(GetPortfolioHistoryRequest(period="1D", timeframe="15Min"))
             if hist and hist.equity:
-                chart_df = pd.DataFrame({"Equity": hist.equity})
-                st.area_chart(chart_df, height=100, color="#29b5e8")
-        except: st.caption("Graph Unavailable")
+                st.area_chart(pd.DataFrame({"Equity": hist.equity}), height=100, color="#29b5e8")
+        except: st.caption("Graph unavailable")
+        
+        # Historic Stats
+        st.markdown("---")
+        perf = broker.get_portfolio_history_stats()
+        c1, c2 = st.columns(2)
+        c1.write(f"1D: {perf.get('1D','N/A')}"); c2.write(f"1W: {perf.get('1W','N/A')}")
+        c3, c4 = st.columns(2)
+        c3.write(f"1M: {perf.get('1M','N/A')}"); c4.write(f"1Y: {perf.get('1A','N/A')}")
     else:
         st.error("🔴 DISCONNECTED")
 
     st.divider()
     eng = get_status("engine_running") == "1"
-    if st.button("🛑 STOP ENGINE" if eng else "🚀 START ENGINE", use_container_width=True):
+    if st.button("🛑 STOP" if eng else "🚀 START", use_container_width=True):
         update_status("engine_running", "0" if eng else "1"); st.rerun()
 
-# 3. Market Status Bar
+# Market Bar
 if broker: st.info(f"**{broker.get_market_clock()}**")
 
-# 4. Main Tabs
+# --- TABS ---
 t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution", "🔍 Debug"])
 
 with t1: # ASSETS
@@ -80,7 +74,7 @@ with t1: # ASSETS
                 c3.metric("Value", f"${float(p.market_value):,.2f}")
     else: st.info("No active positions.")
 
-with t3: # FULL ADVANCED MANUAL TICKET
+with t3: # FULL MANUAL TICKET
     st.subheader("🕹️ Advanced Manual Ticket")
     with st.form("manual_trade"):
         c1, c2, c3, c4 = st.columns(4)
@@ -90,52 +84,54 @@ with t3: # FULL ADVANCED MANUAL TICKET
         mtype = c4.selectbox("Type", ["market", "limit", "stop", "trailing_stop"])
         
         p1, p2, p3 = st.columns(3)
-        lpx = p1.number_input("Limit Price ($)", 0.0)
-        spx = p2.number_input("Stop Price ($)", 0.0)
-        tif = p3.selectbox("TIF", ["gtc", "day"])
+        lpx = p1.number_input("Limit $", 0.0); spx = p2.number_input("Stop $", 0.0); tif = p3.selectbox("TIF", ["gtc", "day"])
         
-        st.caption("Bracket Guardrails (Entry Protection)")
+        st.caption("Bracket Guardrails")
         b1, b2 = st.columns(2)
-        tp = b1.number_input("Take Profit Price ($)", 0.0)
-        sl = b2.number_input("Stop Loss Price ($)", 0.0)
+        tp = b1.number_input("Take Profit $", 0.0); sl = b2.number_input("Stop Loss $", 0.0)
         
         if st.form_submit_button("🚀 Submit Order", use_container_width=True):
             ok, res = broker.submit_order_v2(mtype, symbol=msym, qty=mqty, side=mside, limit_price=lpx if lpx>0 else None, time_in_force=tif)
-            if ok: st.success(f"Order ID: {res}")
+            if ok: st.success(f"Sent: {res}")
             else: st.error(res)
 
-with t4: # PERSISTENT EXECUTION HISTORY
-    st.subheader("⚡ Full persistent History")
+with t4: # PERSISTENT EXECUTION
+    st.subheader("⚡ Persistent History")
     with sqlite3.connect(DB_PATH) as conn:
         try:
-            df_hist = pd.read_sql("SELECT * FROM trade_execution ORDER BY submitted_at DESC", conn)
-            st.dataframe(df_hist, use_container_width=True, height=450)
-        except: st.info("No execution records found.")
+            df = pd.read_sql("SELECT * FROM trade_execution ORDER BY submitted_at DESC", conn)
+            st.dataframe(df, use_container_width=True, height=450)
+        except: st.info("No records found.")
 
-with t5: # SYSTEM DIAGNOSTICS
+with t5: # ADVANCED DEBUG
     st.header("🔍 System Diagnostics")
     r1, r2, r3 = st.columns(3)
     
-    # 1. Resource Usage (Using psutil)
+    # Resource Monitor
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-    r1.metric("RAM Usage", f"{mem.percent}%", f"{mem.used//1024**2}MB Used")
+    r1.metric("RAM Usage", f"{mem.percent}%", f"{mem.used//1024**2}MB")
     r2.metric("Disk Free", f"{disk.free//1024**3}GB", f"{disk.percent}% Used")
     
-    # 2. Mean Latency (24H Calculation)
+    # Latency Calculation
     avg_lat = broker.get_mean_latency_24h()
     r3.metric("Avg Latency (24h)", f"{avg_lat:.1f}ms")
 
     st.divider()
-    st.subheader("2. API Status (Fallback Active)")
-    def mask(k): 
-        v = os.getenv(k)
-        if not v and k == 'APIKEY_LIVE': v = os.getenv('APIKEY')
-        return f"✅ {v[:4]}..." if v else "❌ Missing"
+    st.subheader("2. API Routing Logic")
     
+    # Show exactly what the broker is using right now
+    act_key, _, is_paper = Config.get_auth()
     st.markdown(f"""<div class="debug-card">
-        MODE:      {Config.MODE}<br>
-        LIVE_KEY:  {mask('APIKEY_LIVE')}<br>
-        PAPER_KEY: {mask('APIKEY_PAPER')}<br>
-        MAIN_KEY:  {mask('APIKEY')}
+        <b>Active Mode:</b> {Config.MODE}<br>
+        <b>In-Use Key:</b> {act_key[:4]}...{act_key[-4:]}<br>
+        <b>Target Endpoint:</b> {"Paper Simulator" if is_paper else "Live Exchange"}
     </div>""", unsafe_allow_html=True)
+    
+    with st.expander("Show Raw Environment Fallback Check"):
+        def mask(k): 
+            v = os.getenv(k)
+            return f"✅ {v[:4]}..." if v else "❌ Missing"
+        st.write(f"API_LIVE: {mask('APIKEY_LIVE')}")
+        st.write(f"API_PAPER: {mask('APIKEY_PAPER')}")
+        st.write(f"API_MAIN (Fallback Source): {mask('APIKEY')}")
