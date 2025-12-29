@@ -543,9 +543,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Broker:
     def __init__(self):
+        # HARDCODED TO PAPER TRADING
         self.base_url = "https://paper-api.alpaca.markets"
-        self.api_key = os.getenv("APIKEY")
-        self.secret_key = os.getenv("SECRETKEY")
+        
+        # FIX: Use specific PAPER keys to match the URL above
+        self.api_key = os.getenv("APIKEY_PAPER")
+        self.secret_key = os.getenv("SECRETKEY_PAPER")
+
+        # Fallback: If PAPER keys are missing, try the generic ones (but this risks the 'AK' error)
+        if not self.api_key:
+            self.api_key = os.getenv("APIKEY")
+            self.secret_key = os.getenv("SECRETKEY")
 
         self.api = tradeapi.REST(
             key_id=self.api_key,
@@ -556,7 +564,6 @@ class Broker:
         self.api._session.trust_env = False
         self.api._session.verify = False
 
-    # ... (Keep test_connection, get_market_clock, get_portfolio_history_stats, get_account_stats, get_orders_for_symbol, has_open_order as is) ...
     def test_connection(self):
         try:
             acct = self.api.get_account()
@@ -596,7 +603,8 @@ class Broker:
                 if hist.equity:
                     start = hist.equity[0]
                     end = hist.equity[-1]
-                    if start == 0: start = 1
+                    if start == 0:
+                        start = 1
                     pct = ((end - start) / start) * 100
                     data[label] = f"{pct:+.2f}%"
                 else:
@@ -629,7 +637,7 @@ class Broker:
             return len(orders) > 0
         except Exception:
             return True
-            
+
     def is_holding(self, symbol):
         try:
             return self.api.get_position(symbol)
@@ -651,25 +659,28 @@ class Broker:
         try:
             trade = self.api.get_latest_trade(symbol)
             return float(trade.price)
-        except:
+        except Exception:
             return 0.0
 
     def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
         args = {"symbol": symbol, "qty": qty, "side": side, "type": type, "time_in_force": "gtc"}
-        if limit_px: args['limit_price'] = limit_px
-        if stop_px: args['stop_price'] = stop_px
-        if trail_pct: args['trail_percent'] = trail_pct
+        if limit_px:
+            args['limit_price'] = limit_px
+        if stop_px:
+            args['stop_price'] = stop_px
+        if trail_pct:
+            args['trail_percent'] = trail_pct
 
         try:
             # 1. Snapshot Price BEFORE submitting
             snap_px = self._get_snapshot_price(symbol)
-            
+
             # 2. Submit
             order = self.api.submit_order(**args)
-            
+
             # 3. Log Attempt
             log_trade_attempt(order.id, symbol, side, qty, type, snap_px)
-            
+
             return True, "Order Submitted"
         except Exception as e:
             return False, str(e)
@@ -678,8 +689,9 @@ class Broker:
         try:
             # 1. Snapshot Price
             snap_px = self._get_snapshot_price(sym)
-            if snap_px == 0: return # Safety check
-            
+            if snap_px == 0:
+                return  # Safety check
+
             # 2. Submit
             order = self.api.submit_order(
                 symbol=sym, qty=qty, side='buy', type='market', time_in_force='gtc',
@@ -687,10 +699,10 @@ class Broker:
                 take_profit={'limit_price': round(snap_px * (1 + tp_pct), 2)},
                 stop_loss={'stop_price': round(snap_px * (1 - sl_pct), 2)}
             )
-            
+
             # 3. Log Attempt
             log_trade_attempt(order.id, sym, 'buy', qty, 'market_bracket', snap_px)
-            
+
         except Exception as e:
             print(f"Bracket Error: {e}")
 
@@ -700,7 +712,7 @@ class Broker:
             with sqlite3.connect(DB_PATH) as conn:
                 # Find orders that are NEW (unfilled in our DB)
                 pending = conn.execute("SELECT order_id FROM trade_execution WHERE status='NEW'").fetchall()
-                
+
             for (oid,) in pending:
                 try:
                     # Check Alpaca for status
@@ -708,10 +720,13 @@ class Broker:
                     if o.status == 'filled' and o.filled_avg_price:
                         update_trade_fill(oid, float(o.filled_avg_price), str(o.filled_at))
                     elif o.status in ['canceled', 'expired', 'rejected']:
-                         # Mark as dead in DB so we stop checking
-                         with sqlite3.connect(DB_PATH) as conn:
-                             conn.execute("UPDATE trade_execution SET status=? WHERE order_id=?", (o.status.upper(), oid))
-                except:
+                        # Mark as dead in DB so we stop checking
+                        with sqlite3.connect(DB_PATH) as conn:
+                            conn.execute(
+                                "UPDATE trade_execution SET status=? WHERE order_id=?",
+                                (o.status.upper(), oid)
+                            )
+                except Exception:
                     pass
         except Exception as e:
             print(f"TCA Sync Error: {e}")
@@ -722,7 +737,11 @@ import pandas as pd
 import sqlite3
 import time
 import json
-import plotly.express as px
+import os
+import socket
+import platform
+import requests
+from datetime import datetime
 from src.broker import Broker
 from src.database import get_status, update_status, delete_strategy, DB_PATH
 
@@ -734,6 +753,7 @@ st.markdown("""
     div.stButton > button:active { transform: translateY(4px); box-shadow: none; }
     .paper-badge { background-color: #fffbeb; color: #b7791f; padding: 8px; border: 2px dashed #ecc94b; text-align: center; font-weight: bold; margin-bottom: 15px; }
     .strategy-row { padding: 8px 0; border-bottom: 1px solid #eee; }
+    .debug-box { background-color: #f0f2f6; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 0.85em; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -840,7 +860,90 @@ with t4:
         if not auto: break
         time.sleep(2)
 
-with t5: st.json({"DB": DB_PATH, "API": conn_status})
+with t5:
+    st.header("🔍 System Diagnostics")
+    
+    # 1. System Health
+    st.subheader("1. System Health")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Container Hostname", socket.gethostname())
+    c2.metric("Python Version", platform.python_version())
+    
+    # Check Heartbeat File
+    hb_path = "/tmp/heartbeat"
+    if os.path.exists(hb_path):
+        last_beat = os.path.getmtime(hb_path)
+        diff = time.time() - last_beat
+        status = "✅ Alive" if diff < 60 else f"⚠️ Stalled ({int(diff)}s ago)"
+        c3.metric("Heartbeat", status, delta=f"{int(diff)}s ago", delta_color="inverse")
+    else:
+        c3.metric("Heartbeat", "❌ Missing")
+
+    st.divider()
+
+    # 2. Environment Variables (Safe View)
+    st.subheader("2. Environment Config")
+    
+    def mask_key(k):
+        v = os.getenv(k)
+        if not v: return "❌ Not Set"
+        if len(v) < 8: return "******"
+        return f"{v[:4]}...{v[-4:]} (Len: {len(v)})"
+
+    env_cols = st.columns(2)
+    with env_cols[0]:
+        st.caption("🔑 Credentials Status")
+        st.text_input("APIKEY (Live)", mask_key("APIKEY"), disabled=True)
+        st.text_input("SECRETKEY (Live)", mask_key("SECRETKEY"), disabled=True)
+        st.text_input("APIKEY_PAPER", mask_key("APIKEY_PAPER"), disabled=True)
+        st.text_input("SECRETKEY_PAPER", mask_key("SECRETKEY_PAPER"), disabled=True)
+    
+    with env_cols[1]:
+        st.caption("🌍 Endpoints")
+        st.text_input("PAPER_URL", os.getenv("PAPER_URL", "Default"), disabled=True)
+        st.text_input("LIVE_URL", os.getenv("LIVE_URL", "Default"), disabled=True)
+        st.text_input("REPORT_LINK", mask_key("REPORT_LINK"), disabled=True)
+
+    st.divider()
+
+    # 3. Database Health
+    st.subheader("3. Database Health")
+    if os.path.exists(DB_PATH):
+        size_kb = os.path.getsize(DB_PATH) / 1024
+        st.write(f"📁 **DB Path:** `{DB_PATH}` ({size_kb:.1f} KB)")
+        
+        with sqlite3.connect(DB_PATH) as conn:
+            try:
+                tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)
+                if not tables.empty:
+                    st.caption("Table Row Counts:")
+                    cols = st.columns(len(tables))
+                    for idx, row in tables.iterrows():
+                        tbl = row['name']
+                        count = pd.read_sql(f"SELECT COUNT(*) as c FROM {tbl}", conn).iloc[0]['c']
+                        cols[idx % len(cols)].metric(tbl, count)
+                
+                with st.expander("🔎 Inspect Raw Data Tables"):
+                    sel_table = st.selectbox("Select Table", tables['name'].tolist())
+                    st.dataframe(pd.read_sql(f"SELECT * FROM {sel_table} ORDER BY rowid DESC LIMIT 50", conn), use_container_width=True)
+            except Exception as e:
+                st.error(f"DB Read Error: {e}")
+    else:
+        st.error(f"❌ Database file not found at {DB_PATH}")
+
+    st.divider()
+
+    # 4. Network Diagnostics
+    st.subheader("4. Network Diagnostics")
+    if st.button("ping Alpaca API"):
+        try:
+            st.write("Pinging Alpaca...")
+            start = time.time()
+            broker.api.get_clock()
+            latency = (time.time() - start) * 1000
+            st.success(f"✅ Connection Successful! Latency: **{latency:.0f} ms**")
+        except Exception as e:
+            st.error(f"❌ Connection Failed: {e}")
 
 // src/database.py
 import sqlite3
@@ -945,17 +1048,14 @@ def update_trade_fill(order_id, fill_px, filled_at):
 // src/main.py
 import schedule
 import time
-import os
-import subprocess
 import numpy as np
 import yfinance as yf
 import pandas as pd
-import pytz
+import subprocess
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
 from src.broker import Broker
-# --- NEW IMPORT: Trigger the report ---
 from src.notifications import send_trade_notification
 
 # Set Market Timezone to New York
@@ -1090,41 +1190,48 @@ if __name__ == "__main__":
 
 // src/notifications.py
 import os
-import time
 import requests
-from datetime import datetime
 from alpaca_trade_api.rest import REST
 
-# --- Configuration (Reads from Docker ENV) ---
-API_KEY_LIVE = os.getenv("APIKEY_LIVE") or os.getenv("APIKEY") # Fallback to default if specific not found
-API_SECRET_LIVE = os.getenv("SECRETKEY_LIVE") or os.getenv("SECRETKEY")
+# --- Configuration (Based on Jenkins .env) ---
+
+# LIVE Keys (Mapped to standard APIKEY/SECRETKEY)
+API_KEY_LIVE = os.getenv("APIKEY")
+API_SECRET_LIVE = os.getenv("SECRETKEY")
 URL_LIVE = os.getenv("LIVE_URL", "https://api.alpaca.markets")
 
+# PAPER Keys (Mapped to APIKEY_PAPER)
 API_KEY_PAPER = os.getenv("APIKEY_PAPER")
 API_SECRET_PAPER = os.getenv("SECRETKEY_PAPER")
 URL_PAPER = os.getenv("PAPER_URL", "https://paper-api.alpaca.markets")
 
 REPORT_URL = os.getenv("REPORT_LINK")
 
+
 def get_portfolio_value_usd(api):
     try:
         account = api.get_account()
         return float(account.portfolio_value)
-    except: return 0.0
+    except Exception:
+        return 0.0
+
 
 def get_buying_power(api):
     try:
         account = api.get_account()
         return float(account.buying_power)
-    except: return 0.0
+    except Exception:
+        return 0.0
+
 
 def get_all_balances_sorted(api):
     try:
         positions = api.list_positions()
         account = api.get_account()
         orders = api.list_orders()
-    except: return {}
-    
+    except Exception:
+        return {}
+
     # 1. Start with Cash
     ordered_balances = {}
     ordered_balances[f"{'USD':<6}"] = f"${float(account.cash):.2f}"
@@ -1138,7 +1245,7 @@ def get_all_balances_sorted(api):
             'market_value': market_val,
             'pl_pct': float(position.unrealized_plpc) * 100
         })
-    
+
     # Sort: P/L Descending
     position_list.sort(key=lambda x: x['pl_pct'], reverse=True)
 
@@ -1159,55 +1266,72 @@ def get_all_balances_sorted(api):
 
     return ordered_balances
 
+
 def send_webhook_report(data, as_code_block=False):
-    if not REPORT_URL: return
+    if not REPORT_URL:
+        return
     lines = [f"{key}: {value}" for key, value in data.items()]
     text_block = "\n".join(lines)
-    if as_code_block: text_block = f"```\n{text_block}\n```"
+    if as_code_block:
+        text_block = f"```\n{text_block}\n```"
     try:
         requests.post(REPORT_URL, json={"text": text_block})
-    except Exception as e: print(f"Webhook Error: {e}")
+    except Exception as e:
+        print(f"Webhook Error: {e}")
+
 
 def _fmt_pct(pct):
     return "N/A" if pct is None else f"{pct:+.2f}%"
+
 
 def _first_nonzero(values):
     for v in values:
         try:
             fv = float(v)
-            if fv > 0: return fv
-        except: continue
+            if fv > 0:
+                return fv
+        except Exception:
+            continue
     return None
+
 
 def get_portfolio_return_pct(api, period, timeframe="1D", extended_hours=False):
     try:
         history = api.get_portfolio_history(period=period, timeframe=timeframe, extended_hours=extended_hours)
-    except: return None
+    except Exception:
+        return None
 
     equity_series = list(getattr(history, "equity", []) or [])
-    if not equity_series: return None
+    if not equity_series:
+        return None
 
-    try: end_equity = float(equity_series[-1])
-    except: return None
+    try:
+        end_equity = float(equity_series[-1])
+    except Exception:
+        return None
 
     base_value = float(getattr(history, "base_value", 0) or 0)
-    if base_value <= 0: base_value = _first_nonzero(equity_series) or 0.0
-    if base_value <= 0: return None
+    if base_value <= 0:
+        base_value = _first_nonzero(equity_series) or 0.0
+    if base_value <= 0:
+        return None
 
     return (end_equity / base_value - 1.0) * 100.0
+
 
 def get_performance_summary(api):
     day_pct = get_portfolio_return_pct(api, "1D", "15Min", True)
     month_pct = get_portfolio_return_pct(api, "1M", "1D", False)
     year_pct = get_portfolio_return_pct(api, "1A", "1D", False)
     total_pct = get_portfolio_return_pct(api, "all", "1D", False)
-    
+
     return {
         "Day": _fmt_pct(day_pct),
         "Month": _fmt_pct(month_pct),
         "Year": _fmt_pct(year_pct),
         "Total": _fmt_pct(total_pct),
     }
+
 
 def run_report_cycle(api, label):
     balances = get_all_balances_sorted(api)
@@ -1221,7 +1345,7 @@ def run_report_cycle(api, label):
 
         # 2. Stock List
         send_webhook_report(balances, as_code_block=True)
-        
+
         # 3. Financials
         send_webhook_report({
             "BUYING_POWER": f"${get_buying_power(api):.2f}",
@@ -1232,30 +1356,35 @@ def run_report_cycle(api, label):
         send_webhook_report({"Performance Metrics": ""}, as_code_block=False)
         send_webhook_report(get_performance_summary(api), as_code_block=False)
 
-def send_trade_notification():
+
+def send_trade_notification(time_str=None):
     """Main entry point called by the bot"""
     print("📤 Sending Slack Report...")
-    
-    # Send Time Header
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    send_webhook_report({"✅ Trade Executed": "", "Time": current_time}, as_code_block=False)
 
-    # Report LIVE (If configured)
+    # Send Time Header
+    if not time_str:
+        from datetime import datetime
+        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    send_webhook_report({"✅ Trade Executed": "", "Time": time_str}, as_code_block=False)
+
+    # Report LIVE (Uses APIKEY)
     if API_KEY_LIVE and API_SECRET_LIVE:
         try:
             live_api = REST(API_KEY_LIVE, API_SECRET_LIVE, URL_LIVE)
             run_report_cycle(live_api, "LIVE ACCOUNT")
-        except Exception as e: print(f"Live Report Error: {e}")
+        except Exception as e:
+            print(f"Live Report Error: {e}")
 
-    # Report PAPER (If configured)
+    # Report PAPER (Uses APIKEY_PAPER)
     if API_KEY_PAPER and API_SECRET_PAPER:
         try:
             paper_api = REST(API_KEY_PAPER, API_SECRET_PAPER, URL_PAPER)
             run_report_cycle(paper_api, "PAPER ACCOUNT")
-        except Exception as e: print(f"Paper Report Error: {e}")
+        except Exception as e:
+            print(f"Paper Report Error: {e}")
 
 // src/tuner.py
-import os
 import yfinance as yf
 import pandas_ta_classic as ta
 import optuna
@@ -1270,41 +1399,50 @@ from src.broker import Broker
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
+
 def get_stock_data(symbol):
     try:
         df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False, auto_adjust=False)
-        if df.empty: return None
-        
-        if isinstance(df.columns, pd.MultiIndex): 
+        if df.empty:
+            return None
+
+        if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-            
+
         for c in ["Open", "High", "Low", "Close"]:
             if c in df.columns:
                 s = df[c]
-                if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
+                if isinstance(s, pd.DataFrame):
+                    s = s.iloc[:, 0]
                 df[c] = pd.Series(np.asarray(s).reshape(-1), index=df.index)
         return df
-    except: return None
+    except Exception:
+        return None
+
 
 def precompute_indicators(df):
     df = df.copy()
     try:
         adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-        if adx_df is None or adx_df.empty: return None
-        
+        if adx_df is None or adx_df.empty:
+            return None
+
         # Robust column search
         adx_col = next((c for c in adx_df.columns if c.startswith("ADX")), None)
-        if not adx_col: return None
-        
+        if not adx_col:
+            return None
+
         df['ADX'] = adx_df[adx_col]
         df['RSI'] = ta.rsi(df['Close'], length=14)
-        
+
         # Shift for anti-lookahead
         df['ADX_Prev'] = df['ADX'].shift(1)
         df['RSI_Prev'] = df['RSI'].shift(1)
         df.dropna(inplace=True)
         return df
-    except: return None
+    except Exception:
+        return None
+
 
 def objective(trial, df):
     adx_thresh = trial.suggest_int("adx_trend", 20, 30)
@@ -1314,7 +1452,7 @@ def objective(trial, df):
 
     opens = df['Open'].values
     highs = df['High'].values
-    lows  = df['Low'].values
+    lows = df['Low'].values
     closes = df['Close'].values
     adx_p = df['ADX_Prev'].values
     rsi_p = df['RSI_Prev'].values
@@ -1322,48 +1460,64 @@ def objective(trial, df):
     balance = 1000.0
     pos = 0
     entry = 0.0
-    
+
     for i in range(len(df)):
         if pos > 0:
             stop_px = entry * (1 - sl)
             take_px = entry * (1 + tp)
-            
+
             # Simulated Execution using High/Low
             if lows[i] <= stop_px:
-                balance = pos * min(opens[i], stop_px); pos = 0; continue
+                balance = pos * min(opens[i], stop_px)
+                pos = 0
+                continue
             if highs[i] >= take_px:
-                balance = pos * max(opens[i], take_px); pos = 0; continue
-            
+                balance = pos * max(opens[i], take_px)
+                pos = 0
+                continue
+
             # Trend Reversal Safety
             if rsi_p[i] < 40:
-                balance = pos * opens[i]; pos = 0; continue
+                balance = pos * opens[i]
+                pos = 0
+                continue
         else:
             if adx_p[i] > adx_thresh and rsi_p[i] > rsi_thresh:
-                entry = opens[i]; pos = balance / entry
-    
+                entry = opens[i]
+                pos = balance / entry
+
     final = balance if pos == 0 else pos * closes[-1]
     return (final - 1000.0) / 1000.0
+
 
 def optimize_stock(symbol, broker):
     print(f"🕵️ Tuning {symbol}...")
     raw = get_stock_data(symbol)
-    if raw is None or len(raw) < 100: return
+    if raw is None or len(raw) < 100:
+        return
     df = precompute_indicators(raw)
-    if df is None: return
+    if df is None:
+        return
 
     try:
         sampler = optuna.samplers.TPESampler(seed=42)
         study = optuna.create_study(direction="maximize", sampler=sampler)
         study.optimize(partial(objective, df=df), n_trials=100)
-        
+
         is_holding = broker.is_holding(symbol)
         save_strategy(symbol, study.best_params, is_holding is not None)
         print(f"✅ Tuned {symbol}: {study.best_value:.2%}")
-        del df; del raw; del study; gc.collect()
-    except Exception as e: print(f"⚠️ Error {symbol}: {e}")
+        del df
+        del raw
+        del study
+        gc.collect()
+    except Exception as e:
+        print(f"⚠️ Error {symbol}: {e}")
+
 
 if __name__ == "__main__":
     init_db()
     broker = Broker()
     print("🚀 Starting AI Parameter Tuning...")
-    for t in TICKERS: optimize_stock(t, broker)
+    for t in TICKERS:
+        optimize_stock(t, broker)

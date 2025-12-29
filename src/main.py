@@ -3,139 +3,99 @@ import time
 import numpy as np
 import yfinance as yf
 import pandas as pd
-import subprocess
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
 from src.broker import Broker
 from src.notifications import send_trade_notification
 
-# Set Market Timezone to New York
-MARKET_TZ = "America/New_York"
-
 def process_manual_queue(broker):
     try:
         orders = get_pending_manual_orders()
         for o in orders:
             o_id, sym, qty, side, o_type = o
-            try:
-                broker.submit_manual_order(sym, qty, side, o_type)
-                update_manual_order_status(o_id, 'COMPLETED')
-                
-                # --- TRIGGER: Manual Trade Executed ---
-                print(f"✅ Manual Order {sym} Completed. Sending Report...")
-                send_trade_notification()
-                
-            except Exception:
-                update_manual_order_status(o_id, 'FAILED')
+            ok, msg = broker.submit_order(sym, qty, side, o_type)
+            status = 'COMPLETED' if ok else 'FAILED'
+            update_manual_order_status(o_id, status)
+            if ok: send_trade_notification()
     except Exception as e:
-        print(f"Error in manual queue: {e}")
-
-def daily_summary():
-    broker = Broker()
-    try:
-        stats = broker.get_account_stats()
-        perf = broker.get_portfolio_history_stats()
-        print(f"Daily Stats: {stats} | Performance: {perf}")
-    except: pass
-
-def run_reoptimization():
-    print("🧠 Starting Weekly Re-Optimization...")
-    try:
-        subprocess.Popen(["python", "src/tuner.py"])
-        print("✅ Optimization started in background")
-    except Exception as e:
-        print(f"❌ Failed to start optimizer: {e}")
+        print(f"Manual Queue Error: {e}")
 
 def heart_beat():
-    with open("/tmp/heartbeat", "w") as f:
-        f.write(str(time.time()))
+    # 1. Update Heartbeat File
+    with open("/tmp/heartbeat", "w") as f: f.write(str(time.time()))
 
     broker = Broker()
-    try:
-        msg = broker.get_market_clock()
-        market_open = "🟢" in msg
-        update_status("api_health", msg)
-    except:
-        update_status("api_health", "🔴 API DISCONNECTED")
-        return
+    
+    # 2. Check Connection
+    ok, msg = broker.test_connection()
+    update_status("api_health", msg)
+    if not ok: return
 
-    # Check for manual orders regardless of market status (queued)
+    # 3. Manual Orders (Always run)
     process_manual_queue(broker)
 
+    # 4. Check Engine Switch
     if get_status("engine_running") == "0": return
 
-    if market_open:
-        strategies = get_strategies()
-        num_symbols = len(strategies) if len(strategies) > 0 else 1
+    # 5. Check Market Open
+    if "Closed" in broker.get_market_clock(): return
 
+    # 6. Strategy Logic
+    strategies = get_strategies()
+    if not strategies: return
+
+    stats = broker.get_account_stats()
+    cash = stats.get('Cash', 0.0)
+    equity = stats.get('Equity', 0.0)
+    target_per_stock = equity / len(strategies)
+
+    for sym, p in strategies.items():
+        # A. Get Data
+        df = yf.download(sym, period="5d", interval="1h", progress=False)
+        if df.empty: continue
+        
+        # B. Calc Indicators
+        # (Assuming simple close series)
+        close = df['Close']
+        if isinstance(close, pd.DataFrame): close = close.iloc[:,0]
+        
         try:
-            account = broker.api.get_account()
-            total_equity = float(account.portfolio_value)
-            cash_available = float(account.cash)
-        except: return
+            rsi = RSIIndicator(close).rsi().iloc[-1]
+            adx = ADXIndicator(df['High'], df['Low'], close).adx().iloc[-1]
+        except: continue
 
-        target_usd_per_stock = total_equity / num_symbols
+        # C. Check Positions
+        pos = broker.is_holding(sym)
 
-        for sym, p in strategies.items():
-            # 1. Download (Shape Fix + Threadless)
-            df = yf.download(sym, period="5d", interval="1h", progress=False, threads=False)
-            if df.empty: continue
-
-            # --- CRITICAL FIX: Flatten 2D Data ---
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            for c in ["High", "Low", "Close"]:
-                if c in df.columns:
-                    s = df[c]
-                    if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
-                    df[c] = pd.Series(np.asarray(s).reshape(-1), index=df.index)
-            # -------------------------------------
-
-            # 2. Indicators
-            try:
-                adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
-                rsi_gen = RSIIndicator(close=df['Close'], window=14)
-                curr_rsi = rsi_gen.rsi().iloc[-1]
-                curr_adx = adx_gen.adx().iloc[-1]
-            except: continue
-
-            # 3. Execution
-            is_holding = broker.is_holding(sym)
-            has_pending = broker.has_open_order(sym)
-
-            if not is_holding and not has_pending:
-                if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
-                    try:
-                        current_price = float(broker.api.get_latest_trade(sym).price)
-                        allowed_spend = min(target_usd_per_stock, cash_available)
-                        qty = int(allowed_spend / current_price)
-                        if qty > 0:
-                            print(f"🚀 BUY SIGNAL: {sym}")
-                            broker.buy_bracket(sym, qty, p['target'], p['stop'])
-                            cash_available -= (qty * current_price)
-                            
-                            # --- TRIGGER: Auto Buy Executed ---
+        # D. Logic
+        if not pos:
+            # ENTRY
+            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
+                price = broker.get_latest_price(sym)
+                if price > 0 and cash > price:
+                    qty = int(min(cash, target_per_stock) / price)
+                    if qty >= 1:
+                        # CALCULATE BRACKET PRICES
+                        tp_price = round(price * (1 + p['target']), 2)
+                        sl_price = round(price * (1 - p['stop']), 2)
+                        
+                        # EXECUTE BRACKET
+                        if broker.buy_bracket(sym, qty, tp_price, sl_price):
                             send_trade_notification()
-                            
-                    except: pass
-
-            elif is_holding:
-                if curr_rsi < 40:
-                    broker.sell_all(sym)
-                    
-                    # --- TRIGGER: Auto Sell Executed ---
-                    print(f"📉 SELL SIGNAL: {sym}")
-                    send_trade_notification()
+                            cash -= (qty * price) # Adjust local cash estimate
+        else:
+            # EXIT (Panic / Strategy Exit)
+            # Note: The Bracket order handles TP/SL automatically!
+            # We only need to force sell if RSI indicates a crash not caught by SL
+            if rsi < 40:
+                broker.close_position(sym)
+                send_trade_notification()
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trading Heart Started...")
+    print("🚀 Algo-Trader (Alpaca-Py Edition) Starting...")
     schedule.every(1).minutes.do(heart_beat)
-    schedule.every().day.at("21:00").do(daily_summary)
-    schedule.every().sunday.at("04:00").do(run_reoptimization)
-    heart_beat()
     while True:
         schedule.run_pending()
         time.sleep(1)
