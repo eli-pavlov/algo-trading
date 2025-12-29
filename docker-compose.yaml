@@ -3,16 +3,18 @@ services:
     image: algo-trader
     container_name: algo_heart
     volumes:
-      - ${WS_PATH}/data:/app/data
-      - ${WS_PATH}/src:/app/src
-      - ${WS_PATH}/config:/app/config
-    # ... rest of config ...
+      - /home/opc/algo-deploy/data:/app/data
+      - /home/opc/algo-deploy/src:/app/src
+      - /home/opc/algo-deploy/config:/app/config
+    network_mode: "host"
+    env_file: .env
 
   dashboard:
     image: algo-trader
     container_name: algo_ui
     volumes:
-      - ${WS_PATH}/data:/app/data
-      - ${WS_PATH}/src:/app/src
+      - /home/opc/algo-deploy/data:/app/data
+      - /home/opc/algo-deploy/src:/app/src
+    network_mode: "host"
+    env_file: .env
     command: streamlit run src/dashboard.py --server.port=8501
-    # ... rest of config ...
