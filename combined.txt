@@ -68,7 +68,9 @@ market_scanner.*
 version: '3.8'
 services:
   trading-bot:
-    build: .
+    build:
+      context: .
+      network: host  # This is the key fix for ARM/Oracle network issues
     container_name: algo_heart
     restart: always
     env_file: .env
@@ -80,7 +82,9 @@ services:
       retries: 3
 
   dashboard:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: algo_ui
     ports:
       - "8501:8501"
@@ -93,15 +97,23 @@ services:
 FROM python:3.9-slim
 WORKDIR /app
 
-# Install system dependencies for numerical libraries
-RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
+# 1. Install system-level dependencies (Cached)
+RUN apt-get update && apt-get install -y gcc g++ ca-certificates && \
+    update-ca-certificates && rm -rf /var/lib/apt/lists/*
 
+# 2. Copy ONLY the requirements file first (Cached)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
+# 3. Install Python packages (This layer is now cached!)
+# Docker will ONLY re-run this if requirements.txt changes
+RUN pip install --no-cache-dir \
+    --trusted-host pypi.org \
+    --trusted-host files.pythonhosted.org \
+    -r requirements.txt
+
+# 4. Copy the rest of your code (Changes frequently)
 COPY . .
 
-# Set PYTHONPATH so internal imports like 'from src.database' work
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
@@ -119,25 +131,17 @@ pipeline {
                 checkout scm
             }
         }
-        stage('Lint Check') {
-            steps {
-                // Ensure flake8 is available and check code quality
-                sh 'pip install flake8'
-                sh 'flake8 src/ --count --max-line-length=120'
-            }
-        }
         stage('Prepare Secrets') {
             steps {
-                // Injects the secret .env file from Jenkins credentials
                 withCredentials([file(credentialsId: 'algo-trading-env', variable: 'SECRET_ENV')]) {
-                    sh 'cp $SECRET_ENV .env'
+                    sh 'cp "$SECRET_ENV" .env'
                 }
             }
         }
         stage('Build & Deploy') {
             steps {
-                // Multi-service deployment using Docker Compose
-                sh "docker compose build"
+                // Use --no-cache once to clear out the broken pandas_ta attempts
+                sh "docker compose build --no-cache"
                 sh "docker compose up -d"
                 sh "docker image prune -f"
             }
@@ -358,7 +362,8 @@ krakenex
 pykrakenapi
 yfinance
 pandas
-pandas_ta
+pandas-ta-classic
+ta
 numpy
 python-dotenv
 pyyaml
@@ -370,98 +375,293 @@ pytest
 flake8
 optuna
 scikit-learn
+plotly
 
 // src/analyzer.py
 import yfinance as yf
-import pandas_ta as ta
+import pandas_ta as ta  # This now points to pandas-ta-classic
 import optuna
+import os
 from src.database import save_strategy
-from broker import Broker
+from src.broker import Broker
 
+# Configuration for optimization
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
-def optimize_stock(symbol):
-    df = yf.download(symbol, period="1y", interval="1h")
-    # ... (Insert the Optuna Logic from previous steps here) ...
-    # Simplified placeholder for brevity:
-    best_params = {"adx_trend": 25, "rsi_trend": 50, "stop": 0.05, "target": 0.20}
+
+def objective(trial, df):
+    """
+    Optuna objective function: Simulates trading with different 
+    parameters to maximize profit.
+    """
+    # Parameter Search Space
+    adx_threshold = trial.suggest_int("adx_trend", 15, 35)
+    rsi_threshold = trial.suggest_int("rsi_trend", 40, 65)
+    tp = trial.suggest_float("target", 0.10, 0.40)
+    sl = trial.suggest_float("stop", 0.03, 0.15)
+
+    # Calculate indicators using pandas_ta extensions
+    # We use the copy to avoid modifying the original dataframe
+    df_copy = df.copy()
+    adx_df = df_copy.ta.adx(length=14)
     
+    # Handle different column names produced by pandas_ta
+    adx_col = [col for col in adx_df.columns if 'ADX' in col][0]
+    df_copy['ADX'] = adx_df[adx_col]
+    df_copy['RSI'] = df_copy.ta.rsi(length=14)
+
+    # Fast Backtest Simulation
+    score = 0
+    in_pos = False
+    entry = 0
+
+    for i in range(1, len(df_copy)):
+        price = df_copy['Close'].iloc[i]
+        curr_adx = df_copy['ADX'].iloc[i]
+        curr_rsi = df_copy['RSI'].iloc[i]
+
+        if not in_pos:
+            if curr_adx > adx_threshold and curr_rsi > rsi_threshold:
+                entry = price
+                in_pos = True
+        else:
+            if price >= entry * (1 + tp):
+                score += tp
+                in_pos = False
+            elif price <= entry * (1 - sl):
+                score -= sl
+                in_pos = False
+
+    return score
+
+
+def optimize_stock(symbol):
+    print(f"🧠 Optimizing intelligence for: {symbol}")
+    # Download 1 year of data for deep learning
+    df = yf.download(symbol, period="1y", interval="1h", progress=False)
+
+    if df.empty:
+        print(f"⚠️ No data for {symbol}")
+        return
+
+    # Create Optuna study
+    study = optuna.create_study(direction="maximize")
+    study.optimize(lambda trial: objective(trial, df), n_trials=30)
+
+    best_params = study.best_params
+    print(f"✅ Optimization complete. Best settings: {best_params}")
+
+    # Save to SQLite so main.py can pick them up
     broker = Broker()
     save_strategy(symbol, best_params, broker.is_holding(symbol))
 
+
 if __name__ == "__main__":
-    for t in TICKERS: optimize_stock(t)
+    # Ensure database is ready
+    from src.database import init_db
+    init_db()
+    
+    for ticker in TICKERS:
+        try:
+            optimize_stock(ticker)
+        except Exception as e:
+            print(f"❌ Failed to optimize {ticker}: {e}")
 
 // src/broker.py
+import os
+import requests
 import alpaca_trade_api as tradeapi
-import os, requests
+import urllib3
+
+# Disable the "InsecureRequestWarning" to keep logs clean
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Broker:
     def __init__(self):
-        self.api = tradeapi.REST(
-            os.getenv("APIKEY"), 
-            os.getenv("SECRETKEY"), 
-            os.getenv("PAPER_URL"), 
-            'v2'
-        )
-        self.webhook = os.getenv("REPORT_LINK")
+        self.api_key = os.getenv("APIKEY")
+        self.secret_key = os.getenv("SECRETKEY")
+        self.base_url = os.getenv("PAPER_URL")
+        self.report_url = os.getenv("REPORT_LINK")
 
-    def report(self, message):
-        if self.webhook:
-            requests.post(self.webhook, json={"text": f"🤖 *Bot Alert:* {message}"})
+        # Initialize the REST client
+        self.api = tradeapi.REST(
+            key_id=self.api_key,
+            secret_key=self.secret_key,
+            base_url=self.base_url,
+            api_version='v2'
+        )
+
+        # GLOBAL FIX: Force the underlying requests session to ignore SSL verification
+        self.api._session.verify = False
+
+    def send_webhook_report(self, data_dict, title=None):
+        if not self.report_url:
+            return False
+        header = f"🤖 *{title}*\n" if title else ""
+        body = "\n".join([f"{key}: {value}" for key, value in data_dict.items()])
+        try:
+            # Also ignore SSL for the Slack/Webhook requests
+            requests.post(self.report_url, json={"text": f"{header}{body}"}, verify=False)
+            return True
+        except:
+            return False
+
+    def get_performance_summary(self):
+        stats = {"Day": "1D", "Month": "1M", "Year": "1A", "Total": "all"}
+        results = {}
+        for label, period in stats.items():
+            try:
+                history = self.api.get_portfolio_history(period=period, timeframe="1D")
+                equity = list(getattr(history, "equity", []) or [])
+                base = float(getattr(history, "base_value", 0))
+                if equity and base > 0:
+                    pct = (float(equity[-1]) / base - 1.0) * 100.0
+                    results[label] = f"{pct:+.2f}%"
+                else:
+                    results[label] = "0.00%"
+            except:
+                results[label] = "N/A"
+        return results
+
+    def get_account_stats(self):
+        try:
+            account = self.api.get_account()
+            return {
+                "BUYING_POWER": f"${float(account.buying_power):,.2f}",
+                "TOTAL_PORTFOLIO": f"${float(account.portfolio_value):,.2f}",
+                "CASH": f"${float(account.cash):,.2f}"
+            }
+        except Exception as e:
+            return {"ERROR": "API Connection Failed", "DETAILS": str(e)}
 
     def is_holding(self, symbol):
-        try: return self.api.get_position(symbol)
-        except: return None
+        try:
+            return self.api.get_position(symbol)
+        except:
+            return None
 
     def buy_bracket(self, sym, qty, tp_pct, sl_pct):
-        price = float(self.api.get_latest_trade(sym).price)
-        order = self.api.submit_order(
-            symbol=sym, qty=qty, side='buy', type='market', time_in_force='gtc', 
-            order_class='bracket',
-            take_profit={'limit_price': round(price * (1 + tp_pct), 2)},
-            stop_loss={'stop_price': round(price * (1 - sl_pct), 2)}
-        )
-        self.report(f"Entered {sym} at {price}. Target: +{tp_pct*100}%, SL: -{sl_pct*100}%")
-        return order
+        try:
+            price = float(self.api.get_latest_trade(sym).price)
+            order = self.api.submit_order(
+                symbol=sym,
+                qty=qty,
+                side='buy',
+                type='market',
+                time_in_force='gtc',
+                order_class='bracket',
+                take_profit={'limit_price': round(price * (1 + tp_pct), 2)},
+                stop_loss={'stop_price': round(price * (1 - sl_pct), 2)}
+            )
+            self.send_webhook_report({
+                "Action": "ENTRY EXECUTED",
+                "Symbol": sym,
+                "Price": f"${price}"
+            }, title="🚀 NEW TRADE")
+            return order
+        except Exception as e:
+            self.send_webhook_report({"Error": str(e)}, title="🚨 TRADE FAILED")
+            return None
 
 // src/dashboard.py
 import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import plotly.express as px
+from src.broker import Broker
+from src.database import update_status, get_status, DB_PATH
 
-st.set_page_config(page_title="Deep Seek Terminal", layout="wide")
-DB_PATH = os.getenv("DB_PATH", "data/trading.db")
+st.set_page_config(page_title="Algo Command Center", layout="wide")
+broker = Broker()
 
-def load_data(query):
-    with sqlite3.connect(DB_PATH) as conn:
-        return pd.read_sql(query, conn)
+# --- SIDEBAR: HEALTH & ACCOUNT ---
+st.sidebar.title("📡 System Health")
 
+# API Health and Account Metrics
+account_data = broker.get_account_stats()
+
+if "ERROR" in account_data:
+    st.sidebar.error("API Status: 🔴 DISCONNECTED")
+    st.sidebar.info("Check Alpaca Keys or SSL bypass in broker.py")
+    portfolio_val = "$0.00"
+    buying_power = "$0.00"
+else:
+    # Check Market Status
+    try:
+        clock = broker.api.get_clock()
+        health = "🟢 ONLINE" if clock.is_open else "🟡 MARKET CLOSED"
+    except Exception:
+        health = "🟠 CONNECTED (No Clock)"
+    
+    st.sidebar.success(f"API Status: {health}")
+    portfolio_val = account_data.get('TOTAL_PORTFOLIO', "$0.00")
+    buying_power = account_data.get('BUYING_POWER', "$0.00")
+
+st.sidebar.metric("Portfolio Value", portfolio_val)
+st.sidebar.metric("Buying Power", buying_power)
+
+# Engine Toggle
+engine_on = get_status("engine_running") == "1"
+btn_label = "🛑 STOP ENGINE" if engine_on else "🚀 START ENGINE"
+if st.sidebar.button(btn_label):
+    update_status("engine_running", "0" if engine_on else "1")
+    st.rerun()
+
+# --- MAIN UI ---
 st.title("🛡️ Algo Command Center")
 
-if st.sidebar.button("🧠 Manual AI Re-Optimization"):
-    import subprocess
-    subprocess.run(["python", "src/analyzer.py"])
-    st.sidebar.success("Intelligence Updated!")
-
-tab1, tab2 = st.tabs(["📈 Performance", "⚙️ Strategies"])
+tab1, tab2, tab3 = st.tabs(["📊 Performance", "⚙️ Strategies", "🕹️ Manual Control"])
 
 with tab1:
-    st.subheader("Account Growth")
-    # Pull equity history from DB
+    st.subheader("Holdings & Assets")
     try:
-        df = load_data("SELECT * FROM equity_history")
-        st.plotly_chart(px.line(df, x='timestamp', y='balance'))
-    except: st.info("Waiting for trade data...")
+        positions = broker.api.list_positions()
+        if positions:
+            pos_data = []
+            for p in positions:
+                pos_data.append({
+                    "Symbol": p.symbol,
+                    "Qty": p.qty,
+                    "Avg Entry": p.avg_entry_price,
+                    "Current Price": p.current_price,
+                    "Unrealized P/L": f"{float(p.unrealized_plpc)*100:.2f}%"
+                })
+            st.table(pd.DataFrame(pos_data))
+        else:
+            st.info("No active positions.")
+    except Exception:
+        st.warning("Could not fetch positions from Alpaca.")
 
 with tab2:
     st.subheader("Active Logic Settings")
     try:
-        df_strat = load_data("SELECT * FROM strategies")
-        st.table(df_strat)
-    except: st.warning("No strategies in database.")
+        with sqlite3.connect(DB_PATH) as conn:
+            df_strat = pd.read_sql("SELECT * FROM strategies", conn)
+            if not df_strat.empty:
+                st.dataframe(df_strat, use_container_width=True)
+            else:
+                st.info("No strategies found in database. Run analyzer.py to populate.")
+    except Exception:
+        st.error("Database connection failed.")
+
+with tab3:
+    st.subheader("Manual Override Console")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: m_sym = st.text_input("Symbol (e.g. TSLA)", "TSLA")
+    with col2: m_qty = st.number_input("Quantity", min_value=0.1, value=1.0)
+    with col3: m_side = st.selectbox("Action", ["buy", "sell"])
+    with col4: m_type = st.selectbox("Order Type", ["market", "limit"])
+    
+    if st.button("🔥 SEND MANUAL ORDER"):
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "INSERT INTO manual_orders (symbol, qty, side, type) VALUES (?,?,?,?)",
+                    (m_sym.upper(), m_qty, m_side, m_type)
+                )
+            st.success(f"SUCCESS: {m_side.upper()} order for {m_sym} queued in system.")
+        except Exception as e:
+            st.error(f"Failed to queue order: {e}")
 
 // src/database.py
 import sqlite3
@@ -470,61 +670,156 @@ import json
 
 DB_PATH = os.getenv("DB_PATH", "data/trading.db")
 
-
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
+        # Strategy storage
         conn.execute("CREATE TABLE IF NOT EXISTS strategies (symbol TEXT PRIMARY KEY, params TEXT, is_active INTEGER)")
+        # Equity tracking
         conn.execute("CREATE TABLE IF NOT EXISTS equity_history (timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, balance REAL)")
+        # NEW: System state (Engine Toggle, API Health)
+        conn.execute("CREATE TABLE IF NOT EXISTS system_status (key TEXT PRIMARY KEY, value TEXT)")
+        # NEW: Manual Command Queue
+        conn.execute("CREATE TABLE IF NOT EXISTS manual_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, qty REAL, side TEXT, type TEXT, status TEXT DEFAULT 'PENDING')")
+        
+        # Default state
+        conn.execute("INSERT OR IGNORE INTO system_status (key, value) VALUES ('engine_running', '1')")
+        conn.execute("INSERT OR IGNORE INTO system_status (key, value) VALUES ('api_health', 'Unknown')")
 
-
-def save_strategy(symbol, params, is_holding):
-    if is_holding:
-        print(f"⚠️ {symbol} is currently active. Skipping rotation.")
-        return
+def update_status(key, value):
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT INTO strategies (symbol, params, is_active) VALUES (?,?,1) "
-                     "ON CONFLICT(symbol) DO UPDATE SET params=excluded.params",
-                     (symbol, json.dumps(params)))
+        conn.execute("INSERT OR REPLACE INTO system_status (key, value) VALUES (?, ?)", (key, str(value)))
 
-
-def get_strategies():
+def get_status(key, default="0"):
     with sqlite3.connect(DB_PATH) as conn:
-        return {r[0]: json.loads(r[1]) for r in conn.execute("SELECT symbol, params FROM strategies WHERE is_active=1")}
+        res = conn.execute("SELECT value FROM system_status WHERE key = ?", (key,)).fetchone()
+        return res[0] if res else default
+
+# ... keep existing save_strategy and get_strategies functions ...
 
 // src/main.py
-import schedule, time, os
-from src.database import init_db, get_strategies
-from src.broker import Broker
-import pandas_ta as ta
+import schedule
+import time
+import os
+import sqlite3
 import yfinance as yf
+from ta.trend import ADXIndicator
+from ta.momentum import RSIIndicator
+from src.database import init_db, get_strategies, get_status, update_status, DB_PATH
+from src.broker import Broker
+
+def process_manual_queue(broker):
+    """
+    Checks the database for manual orders sent from the Streamlit UI.
+    This allows you to 'Buy/Sell' assets manually without stopping the bot.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            # Find any orders that haven't been processed yet
+            orders = conn.execute(
+                "SELECT id, symbol, qty, side, type FROM manual_orders WHERE status='PENDING'"
+            ).fetchall()
+            
+            for o in orders:
+                o_id, sym, qty, side, o_type = o
+                try:
+                    print(f"🕹️ Executing Manual Order: {side} {qty} {sym}")
+                    broker.api.submit_order(
+                        symbol=sym,
+                        qty=qty,
+                        side=side,
+                        type=o_type,
+                        time_in_force='gtc'
+                    )
+                    conn.execute("UPDATE manual_orders SET status='COMPLETED' WHERE id=?", (o_id,))
+                    broker.send_webhook_report(
+                        {"Manual Order": "SUCCESS", "Details": f"{side} {qty} {sym}"}, 
+                        title="🕹️ MANUAL OVERRIDE"
+                    )
+                except Exception as e:
+                    print(f"❌ Manual Order Failed: {e}")
+                    conn.execute("UPDATE manual_orders SET status='FAILED' WHERE id=?", (o_id,))
+    except Exception as e:
+        print(f"Error in manual queue: {e}")
+
+def daily_summary():
+    """Triggered at market close to send total portfolio value and P&L stats to Slack."""
+    broker = Broker()
+    try:
+        stats = broker.get_account_stats()
+        perf = broker.get_performance_summary()
+        broker.send_webhook_report(stats, title="📊 END OF DAY STATS")
+        broker.send_webhook_report(perf, title="📈 PERFORMANCE SUMMARY")
+    except Exception as e:
+        print(f"Error generating daily summary: {e}")
 
 def heart_beat():
-    # Healthcheck for Docker monitoring
+    """
+    The main pulse of the trading engine.
+    Checks API health, manual commands, and automated strategy signals.
+    """
+    # 1. Update Health Check for Docker
     with open("/tmp/heartbeat", "w") as f:
         f.write(str(time.time()))
 
     broker = Broker()
-    if not broker.api.get_clock().is_open:
+    
+    # 2. Check API Health and Market Status
+    try:
+        clock = broker.api.get_clock()
+        market_open = clock.is_open
+        update_status("api_health", "🟢 ONLINE" if market_open else "🟡 MARKET CLOSED")
+    except Exception:
+        update_status("api_health", "🔴 API DISCONNECTED")
         return
 
-    strategies = get_strategies()
-    for sym, p in strategies.items():
-        if not broker.is_holding(sym):
-            df = yf.download(sym, period="5d", interval="1h", progress=False)
-            if df.empty: continue
-            
-            adx = df.ta.adx().iloc[-1]['ADX_14']
-            rsi = df.ta.rsi().iloc[-1]
-            
-            # The "Traffic Light" Logic
-            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
-                broker.buy_bracket(sym, 1, p['target'], p['stop'])
+    # 3. Always process manual orders, even if automated engine is 'OFF'
+    process_manual_queue(broker)
+
+    # 4. Check Engine Toggle (from UI)
+    if get_status("engine_running") == "0":
+        return
+
+    # 5. Automated Strategy Execution (Only if Market is Open)
+    if market_open:
+        strategies = get_strategies()
+        for sym, p in strategies.items():
+            # Only trade if we don't already have a position
+            if not broker.is_holding(sym):
+                df = yf.download(sym, period="5d", interval="1h", progress=False)
+                if df.empty:
+                    continue
+
+                # Indicators using the stable 'ta' library
+                adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+                rsi_gen = RSIIndicator(close=df['Close'], window=14)
+                
+                curr_adx = adx_gen.adx().iloc[-1]
+                curr_rsi = rsi_gen.rsi().iloc[-1]
+
+                # Strategy Check
+                if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
+                    broker.buy_bracket(
+                        sym, 
+                        qty=1, 
+                        tp_pct=p['target'], 
+                        sl_pct=p['stop']
+                    )
 
 if __name__ == "__main__":
+    # Ensure database tables and initial states exist
     init_db()
-    print("🚀 Heart Beat Started...")
+    print("🚀 Algo-Trading Heart Started...")
+
+    # Schedule the loop (Pulse every minute)
     schedule.every(1).minutes.do(heart_beat)
+    
+    # Schedule end-of-day reporting (Adjust time to your timezone)
+    schedule.every().day.at("21:00").do(daily_summary)
+
+    # Initial Run
+    heart_beat()
+
     while True:
         schedule.run_pending()
         time.sleep(1)

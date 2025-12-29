@@ -2,6 +2,7 @@ import schedule
 import time
 import os
 import sqlite3
+import json
 import yfinance as yf
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
@@ -9,62 +10,36 @@ from src.database import init_db, get_strategies, get_status, update_status, DB_
 from src.broker import Broker
 
 def process_manual_queue(broker):
-    """
-    Checks the database for manual orders sent from the Streamlit UI.
-    This allows you to 'Buy/Sell' assets manually without stopping the bot.
-    """
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            # Find any orders that haven't been processed yet
             orders = conn.execute(
                 "SELECT id, symbol, qty, side, type FROM manual_orders WHERE status='PENDING'"
             ).fetchall()
-            
             for o in orders:
                 o_id, sym, qty, side, o_type = o
                 try:
-                    print(f"🕹️ Executing Manual Order: {side} {qty} {sym}")
-                    broker.api.submit_order(
-                        symbol=sym,
-                        qty=qty,
-                        side=side,
-                        type=o_type,
-                        time_in_force='gtc'
-                    )
+                    broker.api.submit_order(symbol=sym, qty=qty, side=side, type=o_type, time_in_force='gtc')
                     conn.execute("UPDATE manual_orders SET status='COMPLETED' WHERE id=?", (o_id,))
-                    broker.send_webhook_report(
-                        {"Manual Order": "SUCCESS", "Details": f"{side} {qty} {sym}"}, 
-                        title="🕹️ MANUAL OVERRIDE"
-                    )
-                except Exception as e:
-                    print(f"❌ Manual Order Failed: {e}")
+                except Exception:
                     conn.execute("UPDATE manual_orders SET status='FAILED' WHERE id=?", (o_id,))
     except Exception as e:
         print(f"Error in manual queue: {e}")
 
 def daily_summary():
-    """Triggered at market close to send total portfolio value and P&L stats to Slack."""
     broker = Broker()
     try:
         stats = broker.get_account_stats()
         perf = broker.get_performance_summary()
         broker.send_webhook_report(stats, title="📊 END OF DAY STATS")
         broker.send_webhook_report(perf, title="📈 PERFORMANCE SUMMARY")
-    except Exception as e:
-        print(f"Error generating daily summary: {e}")
+    except Exception:
+        pass
 
 def heart_beat():
-    """
-    The main pulse of the trading engine.
-    Checks API health, manual commands, and automated strategy signals.
-    """
-    # 1. Update Health Check for Docker
     with open("/tmp/heartbeat", "w") as f:
         f.write(str(time.time()))
 
     broker = Broker()
-    
-    # 2. Check API Health and Market Status
     try:
         clock = broker.api.get_clock()
         market_open = clock.is_open
@@ -73,53 +48,61 @@ def heart_beat():
         update_status("api_health", "🔴 API DISCONNECTED")
         return
 
-    # 3. Always process manual orders, even if automated engine is 'OFF'
     process_manual_queue(broker)
 
-    # 4. Check Engine Toggle (from UI)
     if get_status("engine_running") == "0":
         return
 
-    # 5. Automated Strategy Execution (Only if Market is Open)
     if market_open:
         strategies = get_strategies()
+        num_symbols = len(strategies) if len(strategies) > 0 else 1
+        
+        # Get portfolio value for dynamic sizing
+        account = broker.api.get_account()
+        total_equity = float(account.portfolio_value)
+        cash_available = float(account.cash)
+        
+        # Target USD amount per stock (e.g., if 5 stocks, spend 20% of portfolio each)
+        target_usd_per_stock = total_equity / num_symbols
+
         for sym, p in strategies.items():
-            # Only trade if we don't already have a position
-            if not broker.is_holding(sym):
-                df = yf.download(sym, period="5d", interval="1h", progress=False)
-                if df.empty:
-                    continue
+            df = yf.download(sym, period="5d", interval="1h", progress=False)
+            if df.empty:
+                continue
 
-                # Indicators using the stable 'ta' library
-                adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
-                rsi_gen = RSIIndicator(close=df['Close'], window=14)
-                
-                curr_adx = adx_gen.adx().iloc[-1]
-                curr_rsi = rsi_gen.rsi().iloc[-1]
+            adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+            rsi_gen = RSIIndicator(close=df['Close'], window=14)
+            curr_adx = adx_gen.adx().iloc[-1]
+            curr_rsi = rsi_gen.rsi().iloc[-1]
 
-                # Strategy Check
+            is_holding = broker.is_holding(sym)
+
+            # BUY LOGIC
+            if not is_holding:
                 if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
-                    broker.buy_bracket(
-                        sym, 
-                        qty=1, 
-                        tp_pct=p['target'], 
-                        sl_pct=p['stop']
-                    )
+                    current_price = float(broker.api.get_latest_trade(sym).price)
+                    
+                    # Logic: Use target USD, but don't exceed remaining cash
+                    allowed_spend = min(target_usd_per_stock, cash_available)
+                    qty_to_buy = int(allowed_spend / current_price)
+
+                    if qty_to_buy > 0:
+                        broker.buy_bracket(sym, qty_to_buy, p['target'], p['stop'])
+                        # Update cash estimate for next loop iteration
+                        cash_available -= (qty_to_buy * current_price)
+
+            # EXIT LOGIC (Sell Whole Amount)
+            elif is_holding:
+                # Example Exit: RSI drops below 40 or ADX weakens significantly
+                if curr_rsi < 40:
+                    broker.sell_all(sym)
 
 if __name__ == "__main__":
-    # Ensure database tables and initial states exist
     init_db()
     print("🚀 Algo-Trading Heart Started...")
-
-    # Schedule the loop (Pulse every minute)
     schedule.every(1).minutes.do(heart_beat)
-    
-    # Schedule end-of-day reporting (Adjust time to your timezone)
     schedule.every().day.at("21:00").do(daily_summary)
-
-    # Initial Run
     heart_beat()
-
     while True:
         schedule.run_pending()
         time.sleep(1)

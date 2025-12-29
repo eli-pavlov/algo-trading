@@ -30,7 +30,6 @@ class Broker:
         header = f"🤖 *{title}*\n" if title else ""
         body = "\n".join([f"{key}: {value}" for key, value in data_dict.items()])
         try:
-            # Also ignore SSL for the Slack/Webhook requests
             requests.post(self.report_url, json={"text": f"{header}{body}"}, verify=False)
             return True
         except:
@@ -70,6 +69,28 @@ class Broker:
         except:
             return None
 
+    def sell_all(self, sym):
+        """Liquidates the entire position for a specific symbol."""
+        try:
+            pos = self.is_holding(sym)
+            if pos:
+                self.api.submit_order(
+                    symbol=sym,
+                    qty=pos.qty,
+                    side='sell',
+                    type='market',
+                    time_in_force='gtc'
+                )
+                self.send_webhook_report({
+                    "Action": "EXIT SIGNAL",
+                    "Symbol": sym,
+                    "Qty": pos.qty
+                }, title="📉 POSITION CLOSED")
+                return True
+        except Exception as e:
+            print(f"Error selling {sym}: {e}")
+        return False
+
     def buy_bracket(self, sym, qty, tp_pct, sl_pct):
         try:
             price = float(self.api.get_latest_trade(sym).price)
@@ -86,7 +107,8 @@ class Broker:
             self.send_webhook_report({
                 "Action": "ENTRY EXECUTED",
                 "Symbol": sym,
-                "Price": f"${price}"
+                "Price": f"${price}",
+                "Qty": qty
             }, title="🚀 NEW TRADE")
             return order
         except Exception as e:
