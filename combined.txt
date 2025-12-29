@@ -584,284 +584,286 @@ import pandas as pd
 import sqlite3
 import time
 import json
-import plotly.express as px  # NEW: For charts
+import plotly.express as px
 from src.broker import Broker
 from src.database import get_status, update_status, delete_strategy, DB_PATH
 
-# 1. Page Config
 st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
 
-# --- CUSTOM CSS ---
 st.markdown("""
 <style>
     div.stButton > button { box-shadow: 0px 4px 0px #4a5568; transition: all 0.1s; border: 1px solid #cbd5e0; border-radius: 8px; font-weight: 600; }
     div.stButton > button:active { transform: translateY(4px); box-shadow: none; }
     .paper-badge { background-color: #fffbeb; color: #b7791f; padding: 8px; border: 2px dashed #ecc94b; text-align: center; font-weight: bold; margin-bottom: 15px; }
-    .big-metric { font-size: 24px; font-weight: bold; }
+    .strategy-row { padding: 8px 0; border-bottom: 1px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
 
-# 2. Broker Init
 broker = Broker()
 conn_status, conn_msg = broker.test_connection()
 
-# 3. Sidebar
 with st.sidebar:
     st.markdown('<div class="paper-badge">⚠️ Alpaca Paper Trading</div>', unsafe_allow_html=True)
     st.title("📡 Overview")
     if conn_status: st.success("🟢 API ONLINE")
     else: st.error("🔴 DISCONNECTED")
-    
     st.markdown("---")
     acc = broker.get_account_stats()
     st.metric("Buying Power", f"${acc.get('Power', 0):,.2f}")
     st.metric("Cash", f"${acc.get('Cash', 0):,.2f}")
     st.markdown("---")
     hist = broker.get_portfolio_history_stats()
-    c1, c2 = st.columns(2); c1.caption("1 Day"); c1.write(hist.get('1D')); c2.caption("1 Week"); c2.write(hist.get('1W'))
-    
+    c1,c2 = st.columns(2); c1.caption("1D"); c1.write(hist.get('1D')); c2.caption("1W"); c2.write(hist.get('1W'))
+    c3,c4 = st.columns(2); c3.caption("1M"); c3.write(hist.get('1M')); c4.caption("1Y"); c4.write(hist.get('1A'))
     st.markdown("---")
-    engine_on = get_status("engine_running") == "1"
-    if st.button("🛑 STOP ENGINE" if engine_on else "🚀 START ENGINE", use_container_width=True):
-        update_status("engine_running", "0" if engine_on else "1")
-        st.rerun()
+    eng = get_status("engine_running") == "1"
+    if st.button("🛑 STOP" if eng else "🚀 START", use_container_width=True):
+        update_status("engine_running", "0" if eng else "1"); st.rerun()
 
-# 4. Header
-clock_msg = broker.get_market_clock()
-if "🟢" in clock_msg: st.info(f"**{clock_msg}**")
-else: st.warning(f"**{clock_msg}**")
+clock = broker.get_market_clock()
+if "🟢" in clock: st.info(f"**{clock}**")
+else: st.warning(f"**{clock}**")
 
-# 5. Tabs (Added 5th Tab)
-tab_assets, tab_strat, tab_manual, tab_tca, tab_debug = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution (TCA)", "🔍 Debug"])
+t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution (TCA)", "🔍 Debug"])
 
-# --- TAB 1: ASSETS ---
-with tab_assets:
+with t1:
     try:
-        positions = broker.api.list_positions()
-        if positions:
-            for p in positions:
-                pl = float(p.unrealized_pl)
-                with st.expander(f"{p.symbol} | {p.qty} sh | P/L: ${pl:.2f}"):
-                    c1, c2, c3, c4 = st.columns(4)
+        pos = broker.api.list_positions()
+        if pos:
+            for p in pos:
+                with st.expander(f"{p.symbol} | {p.qty} sh | P/L: ${float(p.unrealized_pl):.2f}"):
+                    c1,c2,c3,c4=st.columns(4)
                     c1.metric("Price", f"${float(p.current_price):.2f}")
                     c2.metric("Entry", f"${float(p.avg_entry_price):.2f}")
                     c3.metric("Day P/L", f"${float(p.unrealized_intraday_pl):.2f}")
-                    c4.metric("Total P/L", f"${pl:.2f}")
+                    c4.metric("Total", f"${float(p.unrealized_pl):.2f}")
         else: st.info("No active positions.")
     except Exception as e: st.error(str(e))
 
-# --- TAB 2: STRATEGIES ---
-with tab_strat:
+with t2:
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql("SELECT * FROM strategies", conn)
         if not df.empty:
-            cols = st.columns([1, 1, 1, 1, 1, 1])
-            cols[0].markdown("**Symbol**"); cols[3].markdown("TP"); cols[4].markdown("SL")
+            c = st.columns([1,1,1,1,1,1])
+            c[0].markdown("**Symbol**"); c[3].markdown("TP"); c[4].markdown("SL")
             st.divider()
-            for i, row in df.iterrows():
+            for i, r in df.iterrows():
                 try:
-                    p = json.loads(row['params'])
-                    c = st.columns([1, 1, 1, 1, 1, 1])
-                    c[0].markdown(f"**{row['symbol']}**")
-                    c[1].caption(f"RSI < {p.get('rsi_trend')}")
-                    c[2].caption(f"ADX > {p.get('adx_trend')}")
+                    p = json.loads(r['params'])
+                    c = st.columns([1,1,1,1,1,1])
+                    c[0].markdown(f"**{r['symbol']}**")
+                    c[1].caption(f"RSI<{p.get('rsi_trend')}")
+                    c[2].caption(f"ADX>{p.get('adx_trend')}")
                     c[3].markdown(f"<span style='color:green'>+{p.get('target',0)*100:.1f}%</span>", unsafe_allow_html=True)
                     c[4].markdown(f"<span style='color:red'>-{p.get('stop',0)*100:.1f}%</span>", unsafe_allow_html=True)
-                    if c[5].button("🗑️", key=f"d_{row['symbol']}"):
-                        delete_strategy(row['symbol']); st.rerun()
-                    st.markdown("<hr style='margin:5px 0'>", unsafe_allow_html=True)
+                    if c[5].button("🗑️", key=f"d_{r['symbol']}"):
+                        delete_strategy(r['symbol']); st.rerun()
+                    st.markdown("<div class='strategy-row'></div>", unsafe_allow_html=True)
                 except: pass
-        else: st.info("No active strategies.")
+        else: st.info("No strategies.")
 
-# --- TAB 3: MANUAL ---
-with tab_manual:
+with t3:
+    st.subheader("🕹️ Manual Trade Ticket")
     with st.form("manual"):
-        c1, c2, c3, c4 = st.columns(4)
+        c1,c2,c3,c4 = st.columns(4)
         sym = c1.text_input("Sym", "TSLA"); qty = c2.number_input("Qty", 1.0); side = c3.selectbox("Side", ["buy","sell"]); type = c4.selectbox("Type", ["market","limit","stop"])
-        if st.form_submit_button("Submit"):
-            ok, msg = broker.submit_manual_order(sym, qty, side, type)
-            if ok: st.success(msg); time.sleep(1); st.rerun()
-            else: st.error(msg)
+        c5,c6,c7 = st.columns(3)
+        lp = c5.number_input("Limit $", 0.0); sp = c6.number_input("Stop $", 0.0); tp = c7.number_input("Trail %", 0.0)
+        if st.form_submit_button("🚀 Submit"):
+            ok, m = broker.submit_manual_order(sym, qty, side, type, lp if lp>0 else None, sp if sp>0 else None, tp if tp>0 else None)
+            if ok: st.success(m); time.sleep(1); st.rerun()
+            else: st.error(m)
 
-# --- TAB 4: TCA (NEW) ---
-with tab_tca:
-    st.subheader("📉 Transaction Cost Analysis")
+with t4:
+    st.subheader("⚡ Live Trade Forensics")
+    c1, c2 = st.columns([1,4]); auto = c1.checkbox("🔴 Live Monitor", True); c2.caption("Streams latency & fill data")
     
-    # 1. Sync Button (Trigger syncing with Alpaca)
-    if st.button("🔄 Sync Trade Logs", use_container_width=True):
-        with st.spinner("Fetching fill data from Alpaca..."):
-            broker.sync_tca_logs()
-            st.success("Sync Complete")
-            time.sleep(1)
-            st.rerun()
-
-    # 2. Fetch Data
-    with sqlite3.connect(DB_PATH) as conn:
-        df_tca = pd.read_sql("SELECT * FROM trade_execution ORDER BY submitted_at DESC", conn)
-    
-    if not df_tca.empty:
-        # 3. Summary Metrics
-        filled = df_tca[df_tca['status'] == 'FILLED']
+    ph = st.empty()
+    while True:
+        try: broker.sync_tca_logs()
+        except: pass
         
-        m1, m2, m3 = st.columns(3)
-        total_trades = len(filled)
-        avg_slip = filled['slippage_pct'].mean() if not filled.empty else 0.0
+        with sqlite3.connect(DB_PATH) as conn:
+            df = pd.read_sql("SELECT * FROM trade_execution ORDER BY submitted_at DESC LIMIT 50", conn)
         
-        m1.metric("Total Fills", total_trades)
-        m2.metric("Avg Slippage", f"{avg_slip:.4f}%", delta=-avg_slip, delta_color="inverse")
-        m3.caption("Positive Slippage = You paid more than expected (Cost).")
+        with ph.container():
+            if not df.empty:
+                avg_api = df.head(5)['api_latency_ms'].mean()
+                avg_fill = df.head(5)['fill_latency_ms'].mean()
+                m1, m2 = st.columns(2)
+                m1.metric("API Latency (Last 5)", f"{avg_api:.0f} ms")
+                m2.metric("Fill Speed (Last 5)", f"{avg_fill:.0f} ms")
+                
+                disp = df[['submitted_at', 'symbol', 'side', 'order_type', 'api_latency_ms', 'fill_latency_ms', 'slippage_pct', 'status']].copy()
+                disp.columns = ['Time', 'Sym', 'Side', 'Type', 'API(ms)', 'Fill(ms)', 'Slip%', 'Status']
+                st.dataframe(disp.style.format({'API(ms)': '{:.0f}', 'Fill(ms)': '{:.0f}', 'Slip%': '{:.4f}%'}), use_container_width=True)
+            else: st.info("No trades recorded yet.")
+        
+        if not auto: break
+        time.sleep(2)
 
-        st.divider()
-
-        # 4. Visual Analysis (Slippage over time)
-        if total_trades > 0:
-            filled['submitted_at'] = pd.to_datetime(filled['submitted_at'])
-            fig = px.scatter(filled, x="submitted_at", y="slippage_pct", 
-                             color="side", size="qty", 
-                             title="Slippage Distribution (Bubble Size = Qty)",
-                             labels={"slippage_pct": "Slippage (%)", "submitted_at": "Time"})
-            st.plotly_chart(fig, use_container_width=True)
-
-        # 5. Raw Data Table
-        st.markdown("### Trade Logs")
-        st.dataframe(df_tca.style.format({
-            "snapshot_price": "${:.2f}", 
-            "fill_price": "${:.2f}",
-            "slippage_pct": "{:.4f}%"
-        }), use_container_width=True)
-    else:
-        st.info("No trade data recorded yet. Place a trade to see analysis.")
-
-# --- TAB 5: DEBUG ---
-with tab_debug:
-    st.json({"DB": DB_PATH, "API": conn_status})
+with t5: st.json({"DB": DB_PATH, "API": conn_status})
 
 // src/database.py
-import sqlite3
 import os
-import json
-from datetime import datetime
+import time
+import requests
+import alpaca_trade_api as tradeapi
+import urllib3
+from datetime import datetime, timezone
+from src.database import log_trade_attempt, update_trade_fill, DB_PATH
+import sqlite3
 
-DB_PATH = os.getenv("DB_PATH", "data/trading.db")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def init_db():
-    """Initializes the database and ensures all tables exist."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        # ... (Existing tables: strategies, system_status, manual_orders) ...
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS strategies 
-            (symbol TEXT PRIMARY KEY, params TEXT, is_active INTEGER)
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS system_status 
-            (key TEXT PRIMARY KEY, value TEXT)
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS manual_orders 
-            (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, qty REAL, 
-             side TEXT, type TEXT, status TEXT DEFAULT 'PENDING')
-        """)
+class Broker:
+    def __init__(self):
+        self.base_url = "https://paper-api.alpaca.markets"
+        self.api_key = os.getenv("APIKEY")
+        self.secret_key = os.getenv("SECRETKEY")
 
-        # --- NEW TABLE: Transaction Cost Analysis (TCA) ---
-        # Stores the price we WANTED (Snapshot) vs the price we GOT (Fill)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trade_execution (
-                order_id TEXT PRIMARY KEY,
-                symbol TEXT,
-                side TEXT,
-                qty REAL,
-                order_type TEXT,
-                snapshot_price REAL,  -- Price at moment of logic
-                fill_price REAL,      -- Actual execution price
-                slippage_pct REAL,    -- (Fill - Snapshot) / Snapshot
-                submitted_at TEXT,
-                filled_at TEXT,
-                status TEXT
-            )
-        """)
-        
-        # Insert Default Values
-        conn.execute("INSERT OR IGNORE INTO system_status (key, value) VALUES ('engine_running', '1')")
-        conn.execute("INSERT OR IGNORE INTO system_status (key, value) VALUES ('api_health', 'Unknown')")
-        conn.commit()
-
-# ... (Keep existing update_status, get_status, save_strategy, delete_strategy, get_strategies) ...
-def update_status(key, value):
-    init_db()  # Defensive check
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT OR REPLACE INTO system_status (key, value) VALUES (?, ?)", (key, str(value)))
-
-def get_status(key, default="0"):
-    init_db()  # Defensive check
-    with sqlite3.connect(DB_PATH) as conn:
-        try:
-            res = conn.execute("SELECT value FROM system_status WHERE key = ?", (key,)).fetchone()
-            return res[0] if res else default
-        except sqlite3.OperationalError:
-            return default
-
-def save_strategy(symbol, params, is_active):
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO strategies (symbol, params, is_active) VALUES (?, ?, ?)",
-            (symbol, json.dumps(params), 1 if is_active else 0)
+        self.api = tradeapi.REST(
+            key_id=self.api_key,
+            secret_key=self.secret_key,
+            base_url=self.base_url,
+            api_version='v2'
         )
+        self.api._session.trust_env = False
+        self.api._session.verify = False
 
-def delete_strategy(symbol):
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("DELETE FROM strategies WHERE symbol = ?", (symbol,))
+    def test_connection(self):
+        try:
+            acct = self.api.get_account()
+            return True, f"Connected to {acct.id}"
+        except Exception as e:
+            return False, str(e)
 
-def get_strategies():
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute("SELECT symbol, params FROM strategies").fetchall()
-        return {row[0]: json.loads(row[1]) for row in rows}
+    def get_market_clock(self):
+        try:
+            clock = self.api.get_clock()
+            now = clock.timestamp.replace(tzinfo=timezone.utc)
+            if clock.is_open:
+                close_time = clock.next_close.replace(tzinfo=timezone.utc)
+                diff = close_time - now
+                hours, remainder = divmod(diff.seconds, 3600)
+                mins, _ = divmod(remainder, 60)
+                return f"🟢 Market Open (Closes in {hours}h {mins}m)"
+            else:
+                open_time = clock.next_open.replace(tzinfo=timezone.utc)
+                diff = open_time - now
+                days = diff.days
+                hours, remainder = divmod(diff.seconds, 3600)
+                mins, _ = divmod(remainder, 60)
+                if days > 0: return f"🔴 Market Closed (Opens in {days} days, {hours}h {mins}m)"
+                else: return f"🔴 Market Closed (Opens in {hours}h {mins}m)"
+        except: return "🟠 Market Status Unavailable"
 
-# --- NEW TCA FUNCTIONS ---
-def log_trade_attempt(order_id, symbol, side, qty, type, snapshot_px):
-    """Records the intent to trade before we know the result."""
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            INSERT OR IGNORE INTO trade_execution 
-            (order_id, symbol, side, qty, order_type, snapshot_price, submitted_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'NEW')
-        """, (str(order_id), symbol, side, float(qty), type, float(snapshot_px), datetime.utcnow().isoformat()))
+    def get_portfolio_history_stats(self):
+        periods = {'1D': '1D', '1W': '1W', '1M': '1M', '1A': '1A'}
+        data = {}
+        for label, p in periods.items():
+            try:
+                hist = self.api.get_portfolio_history(period=p, timeframe="1D")
+                if hist.equity:
+                    start = hist.equity[0]; end = hist.equity[-1]
+                    if start == 0: start = 1
+                    pct = ((end - start) / start) * 100
+                    data[label] = f"{pct:+.2f}%"
+                else: data[label] = "0.00%"
+            except: data[label] = "N/A"
+        return data
 
-def update_trade_fill(order_id, fill_px, filled_at):
-    """Updates the record once Alpaca fills it, calculating slippage."""
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        # Get the original snapshot to calc slippage
-        row = conn.execute("SELECT snapshot_price, side FROM trade_execution WHERE order_id=?", (order_id,)).fetchone()
-        if row:
-            snap_px, side = row
-            if snap_px and fill_px:
-                # Slippage logic: 
-                # Buy: Positive if Fill > Snap (Bad)
-                # Sell: Positive if Fill < Snap (Bad)
-                diff = fill_px - snap_px
-                slip_pct = (diff / snap_px) * 100
-                
-                # Invert for Sell side so Positive is always "Bad Slippage" (Cost)
-                if side == 'sell':
-                    slip_pct = slip_pct * -1
-                
-                conn.execute("""
-                    UPDATE trade_execution 
-                    SET fill_price=?, filled_at=?, slippage_pct=?, status='FILLED'
-                    WHERE order_id=?
-                """, (float(fill_px), str(filled_at), float(slip_pct), order_id))
+    def get_account_stats(self):
+        try:
+            acc = self.api.get_account()
+            return {"Equity": float(acc.portfolio_value), "Power": float(acc.buying_power), "Cash": float(acc.cash)}
+        except: return {}
+
+    def get_orders_for_symbol(self, symbol):
+        try:
+            orders = self.api.list_orders(status='open', symbols=[symbol])
+            return [f"{o.type.upper()} {o.side} @ {o.limit_price or o.stop_price}" for o in orders]
+        except: return []
+
+    def has_open_order(self, symbol):
+        try:
+            orders = self.api.list_orders(status='open', symbols=[symbol])
+            return len(orders) > 0
+        except: return True # Fail-safe
+
+    def is_holding(self, symbol):
+        try: return self.api.get_position(symbol)
+        except: return None
+
+    def sell_all(self, sym):
+        try:
+            pos = self.is_holding(sym)
+            if pos:
+                self.api.submit_order(symbol=sym, qty=pos.qty, side='sell', type='market', time_in_force='gtc')
+        except: pass
+
+    # --- UPDATED METHODS FOR TCA ---
+
+    def _get_snapshot_price(self, symbol):
+        try:
+            return float(self.api.get_latest_trade(symbol).price)
+        except: return 0.0
+
+    def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
+        args = {"symbol": symbol, "qty": qty, "side": side, "type": type, "time_in_force": "gtc"}
+        if limit_px: args['limit_price'] = limit_px
+        if stop_px: args['stop_price'] = stop_px
+        if trail_pct: args['trail_percent'] = trail_pct
+
+        try:
+            snap_px = self._get_snapshot_price(symbol)
+            start_t = time.time()
+            order = self.api.submit_order(**args)
+            lat_ms = (time.time() - start_t) * 1000
+            
+            log_trade_attempt(order.id, symbol, side, qty, type, snap_px, lat_ms)
+            return True, f"Submitted in {lat_ms:.0f}ms"
+        except Exception as e:
+            return False, str(e)
+
+    def buy_bracket(self, sym, qty, tp_pct, sl_pct):
+        try:
+            snap_px = self._get_snapshot_price(sym)
+            if snap_px == 0: return
+            
+            start_t = time.time()
+            order = self.api.submit_order(
+                symbol=sym, qty=qty, side='buy', type='market', time_in_force='gtc',
+                order_class='bracket',
+                take_profit={'limit_price': round(snap_px * (1 + tp_pct), 2)},
+                stop_loss={'stop_price': round(snap_px * (1 - sl_pct), 2)}
+            )
+            lat_ms = (time.time() - start_t) * 1000
+            
+            log_trade_attempt(order.id, sym, 'buy', qty, 'market_bracket', snap_px, lat_ms)
+        except Exception as e:
+            print(f"Bracket Error: {e}")
+
+    def sync_tca_logs(self):
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                pending = conn.execute("SELECT order_id FROM trade_execution WHERE status='NEW'").fetchall()
+            
+            for (oid,) in pending:
+                try:
+                    o = self.api.get_order(oid)
+                    if o.status == 'filled' and o.filled_avg_price:
+                        update_trade_fill(oid, float(o.filled_avg_price), str(o.filled_at))
+                    elif o.status in ['canceled', 'expired', 'rejected']:
+                         with sqlite3.connect(DB_PATH) as conn:
+                             conn.execute("UPDATE trade_execution SET status=? WHERE order_id=?", (o.status.upper(), oid))
+                except: pass
+        except: pass
 
 // src/main.py
 import schedule
 import time
 import os
-import sqlite3
-import json
 import subprocess
 import numpy as np
 import yfinance as yf
@@ -869,78 +871,58 @@ import pandas as pd
 import pytz
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
-from src.database import init_db, get_strategies, get_status, update_status, DB_PATH
+from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
 from src.broker import Broker
 
-# Set Market Timezone to New York (Alpaca's Server Time)
+# Set Market Timezone to New York
 MARKET_TZ = "America/New_York"
 
 def process_manual_queue(broker):
-    """Checks database for manual orders placed via Dashboard."""
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            orders = conn.execute(
-                "SELECT id, symbol, qty, side, type FROM manual_orders WHERE status='PENDING'"
-            ).fetchall()
-            for o in orders:
-                o_id, sym, qty, side, o_type = o
-                try:
-                    broker.submit_manual_order(sym, qty, side, o_type)
-                    conn.execute("UPDATE manual_orders SET status='COMPLETED' WHERE id=?", (o_id,))
-                except Exception:
-                    conn.execute("UPDATE manual_orders SET status='FAILED' WHERE id=?", (o_id,))
+        orders = get_pending_manual_orders()
+        for o in orders:
+            o_id, sym, qty, side, o_type = o
+            try:
+                broker.submit_manual_order(sym, qty, side, o_type)
+                update_manual_order_status(o_id, 'COMPLETED')
+            except Exception:
+                update_manual_order_status(o_id, 'FAILED')
     except Exception as e:
         print(f"Error in manual queue: {e}")
 
-
 def daily_summary():
-    """Prints account stats. Can be extended to send Discord/Email alerts."""
     broker = Broker()
     try:
         stats = broker.get_account_stats()
         perf = broker.get_portfolio_history_stats()
         print(f"Daily Stats: {stats} | Performance: {perf}")
-    except Exception:
-        pass
-
+    except: pass
 
 def run_reoptimization():
-    """Spawns the tuner process to refresh parameters."""
     print("🧠 Starting Weekly Re-Optimization...")
     try:
-        # NOTE: Ensure you have renamed src/analyzer.py to src/tuner.py
-        # If not, change this line to ["python", "src/analyzer.py"]
         subprocess.Popen(["python", "src/tuner.py"])
         print("✅ Optimization started in background")
     except Exception as e:
         print(f"❌ Failed to start optimizer: {e}")
 
-
 def heart_beat():
-    """The main logic loop. Runs every minute."""
-    # 1. Health signal for Docker
     with open("/tmp/heartbeat", "w") as f:
         f.write(str(time.time()))
 
     broker = Broker()
-    
-    # 2. Check API Connection
     try:
         msg = broker.get_market_clock()
         market_open = "🟢" in msg
         update_status("api_health", msg)
-    except Exception:
+    except:
         update_status("api_health", "🔴 API DISCONNECTED")
         return
 
-    # 3. Process Manual Orders (Works even if market is closed)
     process_manual_queue(broker)
 
-    # 4. Check Engine Switch
-    if get_status("engine_running") == "0":
-        return
+    if get_status("engine_running") == "0": return
 
-    # 5. Trading Logic (Only if Market Open)
     if market_open:
         strategies = get_strategies()
         num_symbols = len(strategies) if len(strategies) > 0 else 1
@@ -949,96 +931,61 @@ def heart_beat():
             account = broker.api.get_account()
             total_equity = float(account.portfolio_value)
             cash_available = float(account.cash)
-        except Exception:
-            return
+        except: return
 
-        # Equal-Weight Allocation Logic
         target_usd_per_stock = total_equity / num_symbols
 
         for sym, p in strategies.items():
-            # A. Download Data (Threadless for ARM/Docker stability)
+            # 1. Download (Shape Fix + Threadless)
             df = yf.download(sym, period="5d", interval="1h", progress=False, threads=False)
+            if df.empty: continue
 
-            if df.empty:
-                continue
-
-            # --- ROBUST SHAPE FIX (Prevents "Data must be 1-dimensional" crash) ---
-            # 1. Handle MultiIndex Columns (e.g., Price -> Ticker)
+            # --- CRITICAL FIX: Flatten 2D Data ---
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
-            # 2. Force 1D Series for critical columns
             for c in ["High", "Low", "Close"]:
                 if c in df.columns:
                     s = df[c]
-                    if isinstance(s, pd.DataFrame):
-                        s = s.iloc[:, 0]
-                    # Reshape ensures it's strictly a 1D array, then rebuild Series
+                    if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
                     df[c] = pd.Series(np.asarray(s).reshape(-1), index=df.index)
-            # ----------------------------------------------------------------------
+            # -------------------------------------
 
-            # B. Calculate Indicators
+            # 2. Indicators
             try:
                 adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
                 rsi_gen = RSIIndicator(close=df['Close'], window=14)
-
                 curr_rsi = rsi_gen.rsi().iloc[-1]
                 curr_adx = adx_gen.adx().iloc[-1]
-            except Exception as e:
-                print(f"⚠️ Indiccalc error {sym}: {e}")
-                continue
+            except: continue
 
-            # C. Check Status
+            # 3. Execution
             is_holding = broker.is_holding(sym)
             has_pending = broker.has_open_order(sym)
 
-            # D. Execution Logic
-            
-            # 🟢 BUY SIGNAL
             if not is_holding and not has_pending:
-                # Retrieve strategy params with defaults
-                adx_thresh = p.get('adx_trend', 25)
-                rsi_thresh = p.get('rsi_trend', 50)
-                
-                if curr_adx > adx_thresh and curr_rsi > rsi_thresh:
+                if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
                     try:
                         current_price = float(broker.api.get_latest_trade(sym).price)
                         allowed_spend = min(target_usd_per_stock, cash_available)
-                        qty_to_buy = int(allowed_spend / current_price)
+                        qty = int(allowed_spend / current_price)
+                        if qty > 0:
+                            print(f"🚀 BUY SIGNAL: {sym}")
+                            broker.buy_bracket(sym, qty, p['target'], p['stop'])
+                            cash_available -= (qty * current_price)
+                    except: pass
 
-                        if qty_to_buy > 0:
-                            print(f"🚀 BUY SIGNAL: {sym} @ ${current_price}")
-                            broker.buy_bracket(sym, qty_to_buy, p['target'], p['stop'])
-                            # Deduct cash locally to prevent overspending in same loop
-                            cash_available -= (qty_to_buy * current_price)
-                    except Exception as e:
-                        print(f"❌ Buy failed {sym}: {e}")
-
-            # 🔴 SELL SIGNAL (Safety Net)
-            # Normal exits are handled by Alpaca Bracket Orders (TP/SL).
-            # This is an extra safety check for "Trend Reversal".
             elif is_holding:
                 if curr_rsi < 40:
-                    print(f"📉 EXIT SIGNAL: {sym} RSI {curr_rsi:.2f} < 40")
                     broker.sell_all(sym)
-
 
 if __name__ == "__main__":
     init_db()
     print("🚀 Algo-Trading Heart Started...")
-    
-    # 1. Trading Loop
     schedule.every(1).minutes.do(heart_beat)
-    
-    # 2. Daily Summary (aligned roughly to Market Close)
     schedule.every().day.at("21:00").do(daily_summary)
-
-    # 3. Weekly Auto-Tuner (Sundays at 4 AM)
     schedule.every().sunday.at("04:00").do(run_reoptimization)
-
-    # Run logic once immediately on startup
     heart_beat()
-
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -1052,192 +999,107 @@ import urllib3
 import pandas as pd
 import numpy as np
 import gc
-import shutil
 from functools import partial
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Tuner operates on the specific list of stocks you want to trade
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
 def get_stock_data(symbol):
-    """
-    Downloads and cleans data.
-    - Fixed: auto_adjust=False (keeps raw OHLC)
-    - Fixed: Robust flattening of MultiIndex
-    """
     try:
-        # Threads=False for ARM/Docker stability
-        df = yf.download(symbol, period="1y", interval="1h", 
-                         progress=False, threads=False, auto_adjust=False)
-        
+        df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False, auto_adjust=False)
         if df.empty: return None
-
-        # 1. Fix MultiIndex Columns (Ticker -> Price)
-        if isinstance(df.columns, pd.MultiIndex):
+        
+        if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
-
-        # 2. Fix 2D Array Issues (The "Shape" Fix)
+            
         for c in ["Open", "High", "Low", "Close"]:
             if c in df.columns:
                 s = df[c]
                 if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
                 df[c] = pd.Series(np.asarray(s).reshape(-1), index=df.index)
-
         return df
-    except Exception as e:
-        print(f"❌ Download failed for {symbol}: {e}")
-        return None
+    except: return None
 
 def precompute_indicators(df):
-    """
-    Calculates indicators ONCE before optimization loop.
-    - Fixed: Robust ADX column selection
-    """
     df = df.copy()
     try:
-        # ADX (Directional Movement)
         adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
         if adx_df is None or adx_df.empty: return None
         
-        # Find the correct column (ADX_14 or similar)
+        # Robust column search
         adx_col = next((c for c in adx_df.columns if c.startswith("ADX")), None)
         if not adx_col: return None
         
         df['ADX'] = adx_df[adx_col]
-        
-        # RSI
         df['RSI'] = ta.rsi(df['Close'], length=14)
         
-        # Shift indicators so Row 'i' sees the metrics from 'i-1' (No Lookahead)
+        # Shift for anti-lookahead
         df['ADX_Prev'] = df['ADX'].shift(1)
         df['RSI_Prev'] = df['RSI'].shift(1)
-        
         df.dropna(inplace=True)
         return df
-    except Exception:
-        return None
+    except: return None
 
 def objective(trial, df):
-    """
-    Simulates trading with REALISTIC constraints.
-    - No Lookahead: Decision made on (i-1), Execution on Open(i)
-    - Intra-bar Exits: Check Low vs SL and High vs TP
-    """
-    # 1. Suggest Parameters
     adx_thresh = trial.suggest_int("adx_trend", 20, 30)
     rsi_thresh = trial.suggest_int("rsi_trend", 45, 60)
-    tp_pct = trial.suggest_float("target", 0.10, 0.30)
-    sl_pct = trial.suggest_float("stop", 0.05, 0.10)
+    tp = trial.suggest_float("target", 0.10, 0.30)
+    sl = trial.suggest_float("stop", 0.05, 0.10)
 
-    # Convert columns to numpy arrays for massive speed boost
     opens = df['Open'].values
     highs = df['High'].values
     lows  = df['Low'].values
     closes = df['Close'].values
-    adx_prev = df['ADX_Prev'].values
-    rsi_prev = df['RSI_Prev'].values
+    adx_p = df['ADX_Prev'].values
+    rsi_p = df['RSI_Prev'].values
 
-    # Simulation State
-    balance = 1000.0  # Virtual starting cash
-    position = 0      # 0 = flat, >0 = shares
-    entry_price = 0.0
+    balance = 1000.0
+    pos = 0
+    entry = 0.0
     
-    # 2. Fast Vectorized-Style Loop
     for i in range(len(df)):
-        # EXIT LOGIC (If we have a position)
-        if position > 0:
-            # Check Stop Loss First (Conservative assumption: SL hits before TP)
-            stop_price = entry_price * (1 - sl_pct)
-            take_price = entry_price * (1 + tp_pct)
+        if pos > 0:
+            stop_px = entry * (1 - sl)
+            take_px = entry * (1 + tp)
             
-            # Did we hit SL?
-            if lows[i] <= stop_price:
-                # We assume we got filled at the stop price (or Open if it gapped down)
-                exit_fill = min(opens[i], stop_price)
-                balance = position * exit_fill
-                position = 0
-                continue # Trade over
+            # Simulated Execution using High/Low
+            if lows[i] <= stop_px:
+                balance = pos * min(opens[i], stop_px); pos = 0; continue
+            if highs[i] >= take_px:
+                balance = pos * max(opens[i], take_px); pos = 0; continue
             
-            # Did we hit TP?
-            if highs[i] >= take_price:
-                # We assume we got filled at target (or Open if it gapped up)
-                exit_fill = max(opens[i], take_price)
-                balance = position * exit_fill
-                position = 0
-                continue # Trade over
-                
-            # Trend Reversal Exit (RSI < 40 safety net)
-            # We use the previous closed RSI to decide to sell at Open[i]
-            if rsi_prev[i] < 40:
-                balance = position * opens[i]
-                position = 0
-                continue
-
-        # ENTRY LOGIC (If we are flat)
+            # Trend Reversal Safety
+            if rsi_p[i] < 40:
+                balance = pos * opens[i]; pos = 0; continue
         else:
-            # Decision based on PREVIOUS candle (adx_prev, rsi_prev)
-            # Execution happens at CURRENT Open
-            if adx_prev[i] > adx_thresh and rsi_prev[i] > rsi_thresh:
-                entry_price = opens[i]
-                position = balance / entry_price # All-in
-
-    # Final MTM (Mark to Market) if still holding
-    final_equity = balance if position == 0 else position * closes[-1]
+            if adx_p[i] > adx_thresh and rsi_p[i] > rsi_thresh:
+                entry = opens[i]; pos = balance / entry
     
-    # Return Percentage Return as the Score
-    return (final_equity - 1000.0) / 1000.0
+    final = balance if pos == 0 else pos * closes[-1]
+    return (final - 1000.0) / 1000.0
 
 def optimize_stock(symbol, broker):
     print(f"🕵️ Tuning {symbol}...")
+    raw = get_stock_data(symbol)
+    if raw is None or len(raw) < 100: return
+    df = precompute_indicators(raw)
+    if df is None: return
 
-    # 1. Get Data
-    raw_df = get_stock_data(symbol)
-    if raw_df is None or len(raw_df) < 100:
-        print(f"❌ Insufficient data for {symbol}")
-        return
-
-    # 2. Precompute Indicators (Huge Speedup)
-    df = precompute_indicators(raw_df)
-    if df is None:
-        print(f"❌ Indicator error for {symbol}")
-        return
-
-    # 3. Optimize
     try:
-        # Seed=42 ensures that if you run it twice, you get the same 'best' params
         sampler = optuna.samplers.TPESampler(seed=42)
         study = optuna.create_study(direction="maximize", sampler=sampler)
-
-        # Bind the precomputed DF to the objective
-        optimization_func = partial(objective, df=df)
+        study.optimize(partial(objective, df=df), n_trials=100)
         
-        # 100 Trials is fast now because we precomputed math
-        study.optimize(optimization_func, n_trials=100) 
-
-        print(f"✅ Best for {symbol}: {study.best_params} (Score: {study.best_value:.2%})")
-
         is_holding = broker.is_holding(symbol)
         save_strategy(symbol, study.best_params, is_holding is not None)
-
-        # Cleanup
-        del df
-        del raw_df
-        del study
-        gc.collect()
-
-    except Exception as e:
-        print(f"⚠️ Optimization error on {symbol}: {e}")
+        print(f"✅ Tuned {symbol}: {study.best_value:.2%}")
+        del df; del raw; del study; gc.collect()
+    except Exception as e: print(f"⚠️ Error {symbol}: {e}")
 
 if __name__ == "__main__":
     init_db()
     broker = Broker()
-    
-    # Note: We removed the aggressive cache deletion logic.
-    # Only delete cache manually if you suspect data corruption.
-    
     print("🚀 Starting AI Parameter Tuning...")
-    for t in TICKERS:
-        optimize_stock(t, broker)
+    for t in TICKERS: optimize_stock(t, broker)
