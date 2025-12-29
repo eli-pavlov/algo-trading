@@ -1,15 +1,17 @@
-name: CI Checks
-on: [push]
+name: Code Quality Gate
+on: [push, pull_request]
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
-        with: {python-version: "3.9"}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
       - name: Install dependencies
         run: pip install flake8
-      - name: Lint with flake8
-        run: flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Run Linting
+        # If this fails, the whole Action fails
+        run: flake8 src/ --count --max-line-length=120
