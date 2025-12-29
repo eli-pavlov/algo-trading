@@ -5,19 +5,18 @@ services:
     container_name: algo_heart
     restart: always
     env_file: .env
+    network_mode: "host" # Use host network to ensure it can see the internet like the host does
     volumes:
       - ./data:/app/data
-    healthcheck:
-      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
-      interval: 1m
-      retries: 3
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
 
   dashboard:
     build:
       context: .
     container_name: algo_ui
-    ports:
-      - "8501:8501"
+    network_mode: "host"
     env_file: .env
     volumes:
       - ./data:/app/data
