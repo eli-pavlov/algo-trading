@@ -12,9 +12,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Broker:
     def __init__(self):
+        # HARDCODED TO PAPER TRADING
         self.base_url = "https://paper-api.alpaca.markets"
-        self.api_key = os.getenv("APIKEY")
-        self.secret_key = os.getenv("SECRETKEY")
+        
+        # FIX: Use specific PAPER keys to match the URL above
+        self.api_key = os.getenv("APIKEY_PAPER")
+        self.secret_key = os.getenv("SECRETKEY_PAPER")
+
+        # Fallback: If PAPER keys are missing, try the generic ones (but this risks the 'AK' error)
+        if not self.api_key:
+            self.api_key = os.getenv("APIKEY")
+            self.secret_key = os.getenv("SECRETKEY")
 
         self.api = tradeapi.REST(
             key_id=self.api_key,

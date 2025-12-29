@@ -1,16 +1,13 @@
 import schedule
 import time
-import os
-import subprocess
 import numpy as np
 import yfinance as yf
 import pandas as pd
-import pytz
+import subprocess
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
 from src.broker import Broker
-# --- NEW IMPORT: Trigger the report ---
 from src.notifications import send_trade_notification
 
 # Set Market Timezone to New York

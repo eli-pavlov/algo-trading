@@ -2,11 +2,14 @@ import os
 import requests
 from alpaca_trade_api.rest import REST
 
-# --- Configuration (Reads from Docker ENV) ---
-API_KEY_LIVE = os.getenv("APIKEY_LIVE") or os.getenv("APIKEY")  # Fallback to default if specific not found
-API_SECRET_LIVE = os.getenv("SECRETKEY_LIVE") or os.getenv("SECRETKEY")
+# --- Configuration (Based on Jenkins .env) ---
+
+# LIVE Keys (Mapped to standard APIKEY/SECRETKEY)
+API_KEY_LIVE = os.getenv("APIKEY")
+API_SECRET_LIVE = os.getenv("SECRETKEY")
 URL_LIVE = os.getenv("LIVE_URL", "https://api.alpaca.markets")
 
+# PAPER Keys (Mapped to APIKEY_PAPER)
 API_KEY_PAPER = os.getenv("APIKEY_PAPER")
 API_SECRET_PAPER = os.getenv("SECRETKEY_PAPER")
 URL_PAPER = os.getenv("PAPER_URL", "https://paper-api.alpaca.markets")
@@ -174,7 +177,7 @@ def send_trade_notification(time_str=None):
 
     send_webhook_report({"✅ Trade Executed": "", "Time": time_str}, as_code_block=False)
 
-    # Report LIVE (If configured)
+    # Report LIVE (Uses APIKEY)
     if API_KEY_LIVE and API_SECRET_LIVE:
         try:
             live_api = REST(API_KEY_LIVE, API_SECRET_LIVE, URL_LIVE)
@@ -182,7 +185,7 @@ def send_trade_notification(time_str=None):
         except Exception as e:
             print(f"Live Report Error: {e}")
 
-    # Report PAPER (If configured)
+    # Report PAPER (Uses APIKEY_PAPER)
     if API_KEY_PAPER and API_SECRET_PAPER:
         try:
             paper_api = REST(API_KEY_PAPER, API_SECRET_PAPER, URL_PAPER)
