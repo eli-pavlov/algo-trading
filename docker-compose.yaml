@@ -1,25 +1,32 @@
 version: '3.8'
 services:
   trading-bot:
-    image: algo-trader  # <--- Uses the pre-built image
+    image: algo-trader
     container_name: algo_heart
     restart: always
     env_file: .env
-    network_mode: "host" # Bypasses Jenkins/Stapler proxy issues
+    network_mode: "host"
     volumes:
       - ./data:/app/data
+    # --- NEW SECTION: Unlock Memory ---
+    deploy:
+      resources:
+        limits:
+          memory: 3G  # Allow up to 4GB
+        reservations:
+          memory: 1G  # Guarantee at least 1GB
+    # ----------------------------------
     healthcheck:
       test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
       interval: 1m
       retries: 3
 
   dashboard:
-    image: algo-trader  # <--- Uses the same pre-built image
+    image: algo-trader
     container_name: algo_ui
     restart: always
     network_mode: "host"
     env_file: .env
     volumes:
       - ./data:/app/data
-    # Ports are ignored in host mode, but command remains valid
     command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
