@@ -16,13 +16,12 @@ pipeline {
                 }
             }
         }
-    stage('Build & Deploy') {
-        steps {
-            // We tell docker to use the host network to avoid the SSL/DNS timeout issues
-            sh "docker compose build --network=host"
-            sh "docker compose up -d"
-            sh "docker image prune -f"
+        stage('Build & Deploy') {
+            steps {
+                sh "docker compose build"
+                sh "docker compose up -d"
+                sh "docker image prune -f"
+            }
         }
-    }
     }
 }

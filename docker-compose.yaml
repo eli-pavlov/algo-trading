@@ -1,7 +1,9 @@
 version: '3.8'
 services:
   trading-bot:
-    build: .
+    build:
+      context: .
+      network: host  # This is the key fix for ARM/Oracle network issues
     container_name: algo_heart
     restart: always
     env_file: .env
@@ -13,7 +15,9 @@ services:
       retries: 3
 
   dashboard:
-    build: .
+    build:
+      context: .
+      network: host
     container_name: algo_ui
     ports:
       - "8501:8501"
