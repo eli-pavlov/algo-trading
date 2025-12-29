@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
 class Broker:
     def __init__(self):
         self.base_url = "https://paper-api.alpaca.markets"
         self.api_key = os.getenv("APIKEY")
         self.secret_key = os.getenv("SECRETKEY")
-        
+
         self.api = tradeapi.REST(
             key_id=self.api_key,
             secret_key=self.secret_key,
@@ -34,7 +35,7 @@ class Broker:
         try:
             clock = self.api.get_clock()
             now = clock.timestamp.replace(tzinfo=timezone.utc)
-            
+
             if clock.is_open:
                 # Calculate time to close
                 close_time = clock.next_close.replace(tzinfo=timezone.utc)
@@ -49,17 +50,14 @@ class Broker:
                 days = diff.days
                 hours, remainder = divmod(diff.seconds, 3600)
                 mins, _ = divmod(remainder, 60)
-                
+
                 if days > 0:
                     return f"🔴 Market Closed (Opens in {days} days, {hours}h {mins}m)"
                 else:
                     return f"🔴 Market Closed (Opens in {hours}h {mins}m)"
-        except:
+        except Exception:
             return "🟠 Market Status Unavailable"
 
-    # ... (Keep get_portfolio_history_stats, get_account_stats, submit_manual_order as they were) ...
-    # ... (Keep get_orders_for_symbol, is_holding, sell_all, buy_bracket from previous version) ...
-    
     def get_portfolio_history_stats(self):
         """Fetches 1D, 1W, 1M, 1A performance."""
         # Note: '1A' might fail on some accounts, handled by try/except in loop
@@ -72,12 +70,13 @@ class Broker:
                     start = hist.equity[0]
                     end = hist.equity[-1]
                     # Handle division by zero if account is new/empty
-                    if start == 0: start = 1 
+                    if start == 0:
+                        start = 1
                     pct = ((end - start) / start) * 100
                     data[label] = f"{pct:+.2f}%"
                 else:
                     data[label] = "0.00%"
-            except:
+            except Exception:
                 data[label] = "N/A"
         return data
 
@@ -89,7 +88,7 @@ class Broker:
                 "Power": float(acc.buying_power),
                 "Cash": float(acc.cash)
             }
-        except:
+        except Exception:
             return {}
 
     def get_orders_for_symbol(self, symbol):
@@ -97,14 +96,26 @@ class Broker:
             orders = self.api.list_orders(status='open', symbols=[symbol])
             # Format: "STOP sell @ 150.00"
             return [f"{o.type.upper()} {o.side} @ {o.limit_price or o.stop_price}" for o in orders]
-        except:
+        except Exception:
             return []
+
+    def has_open_order(self, symbol):
+        """Checks if there are any pending orders (buy or sell) for this symbol."""
+        try:
+            orders = self.api.list_orders(status='open', symbols=[symbol])
+            return len(orders) > 0
+        except Exception:
+            # If API fails, assume true to be safe (fail-safe)
+            return True
 
     def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
         args = {"symbol": symbol, "qty": qty, "side": side, "type": type, "time_in_force": "gtc"}
-        if limit_px: args['limit_price'] = limit_px
-        if stop_px: args['stop_price'] = stop_px
-        if trail_pct: args['trail_percent'] = trail_pct
+        if limit_px:
+            args['limit_price'] = limit_px
+        if stop_px:
+            args['stop_price'] = stop_px
+        if trail_pct:
+            args['trail_percent'] = trail_pct
 
         try:
             self.api.submit_order(**args)
@@ -113,15 +124,18 @@ class Broker:
             return False, str(e)
 
     def is_holding(self, symbol):
-        try: return self.api.get_position(symbol)
-        except: return None
-    
+        try:
+            return self.api.get_position(symbol)
+        except Exception:
+            return None
+
     def sell_all(self, sym):
         try:
             pos = self.is_holding(sym)
             if pos:
                 self.api.submit_order(symbol=sym, qty=pos.qty, side='sell', type='market', time_in_force='gtc')
-        except: pass
+        except Exception:
+            pass
 
     def buy_bracket(self, sym, qty, tp_pct, sl_pct):
         try:
@@ -132,4 +146,5 @@ class Broker:
                 take_profit={'limit_price': round(price * (1 + tp_pct), 2)},
                 stop_loss={'stop_price': round(price * (1 - sl_pct), 2)}
             )
-        except: pass
+        except Exception:
+            pass

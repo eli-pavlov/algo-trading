@@ -399,12 +399,14 @@ import urllib3
 import pandas as pd
 import gc
 import shutil
+from functools import partial
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
+
 
 def objective(trial, df):
     # Reduced search space for stability
@@ -414,15 +416,17 @@ def objective(trial, df):
     sl = trial.suggest_float("stop", 0.05, 0.10)
 
     df_copy = df.copy()
-    
+
     # Check for valid data length for indicators
-    if len(df_copy) < 50: return -100
+    if len(df_copy) < 50:
+        return -100
 
     # Calculate ADX safely
     try:
         adx_df = ta.adx(df_copy['High'], df_copy['Low'], df_copy['Close'], length=14)
-        if adx_df is None or adx_df.empty: return -100
-        
+        if adx_df is None or adx_df.empty:
+            return -100
+
         # Use position-based indexing (safer than name-based)
         df_copy['ADX'] = adx_df.iloc[:, 0]
         df_copy['RSI'] = ta.rsi(df_copy['Close'], length=14)
@@ -431,6 +435,7 @@ def objective(trial, df):
         return -100
 
     score, in_pos, entry = 0, False, 0
+    # Vectorized calculation is faster but iterating is fine for logic clarity
     for i in range(len(df_copy)):
         price = df_copy['Close'].iloc[i]
         curr_adx = df_copy['ADX'].iloc[i]
@@ -448,44 +453,63 @@ def objective(trial, df):
                 in_pos = False
     return score
 
-def optimize_stock(symbol, broker):
-    print(f"🕵️ Analyzing {symbol}...")
+
+def get_stock_data(symbol):
+    """Helper to fetch and clean data, isolated for linter safety."""
     try:
-        # Download data with threads=False to prevent CFFI/Curl crashes on ARM
         df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False)
-        
         if df.empty:
-            print(f"❌ No data for {symbol}")
-            return
+            return None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Optimize with fewer trials to save RAM
+        return df
+    except Exception as e:
+        print(f"❌ Download failed for {symbol}: {e}")
+        return None
+
+
+def optimize_stock(symbol, broker):
+    print(f"🕵️ Analyzing {symbol}...")
+
+    # 1. Get Data
+    df = get_stock_data(symbol)
+
+    if df is None or df.empty:
+        print(f"❌ No data for {symbol}")
+        return
+
+    # 2. Optimize
+    try:
         study = optuna.create_study(direction="maximize")
-        study.optimize(lambda trial: objective(trial, df), n_trials=5)
-        
+
+        # Use partial to bind df explicitly, which satisfies the linter
+        optimization_func = partial(objective, df=df)
+        study.optimize(optimization_func, n_trials=5)
+
         print(f"✅ Best for {symbol}: {study.best_params}")
-        
+
         is_holding = broker.is_holding(symbol)
         save_strategy(symbol, study.best_params, is_holding is not None)
-        
-        # Aggressive Cleanup
+
+        # Cleanup
         del df
         del study
         gc.collect()
-        
+
     except Exception as e:
-        print(f"⚠️ Error on {symbol}: {e}")
+        print(f"⚠️ Optimization error on {symbol}: {e}")
+
 
 if __name__ == "__main__":
     init_db()
-    
+
     # Clear yfinance cache to prevent corruption errors
     cache_dir = os.path.expanduser("~/.cache/yfinance")
     if os.path.exists(cache_dir):
         shutil.rmtree(cache_dir)
-        
+
     broker = Broker()
     for t in TICKERS:
         optimize_stock(t, broker)
@@ -859,11 +883,12 @@ import os
 import sqlite3
 import json
 import yfinance as yf
-import pandas as pd # Needed for MultiIndex check
+import pandas as pd  # Needed for MultiIndex check
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, DB_PATH
 from src.broker import Broker
+
 
 def process_manual_queue(broker):
     try:
@@ -881,15 +906,17 @@ def process_manual_queue(broker):
     except Exception as e:
         print(f"Error in manual queue: {e}")
 
+
 def daily_summary():
     broker = Broker()
     try:
         stats = broker.get_account_stats()
-        perf = broker.get_portfolio_history_stats() # Updated to use the new method
+        perf = broker.get_portfolio_history_stats()  # Updated to use the new method
         # Placeholder for webhook logic if you implement notifications later
-        print(f"Daily Stats: {stats}") 
+        print(f"Daily Stats: {stats} | Performance: {perf}")
     except Exception:
         pass
+
 
 def heart_beat():
     # Health signal for Docker
@@ -913,11 +940,11 @@ def heart_beat():
     if market_open:
         strategies = get_strategies()
         num_symbols = len(strategies) if len(strategies) > 0 else 1
-        
+
         account = broker.api.get_account()
         total_equity = float(account.portfolio_value)
         cash_available = float(account.cash)
-        
+
         # Equal-Weight Logic
         target_usd_per_stock = total_equity / num_symbols
 
@@ -925,7 +952,7 @@ def heart_beat():
             # 1. Download Data
             # threads=False prevents the ARM cffi crash
             df = yf.download(sym, period="5d", interval="1h", progress=False, threads=False)
-            
+
             if df.empty:
                 continue
 
@@ -939,7 +966,7 @@ def heart_beat():
             try:
                 adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
                 rsi_gen = RSIIndicator(close=df['Close'], window=14)
-                
+
                 curr_rsi = rsi_gen.rsi().iloc[-1]
                 curr_adx = adx_gen.adx().iloc[-1]
             except Exception as e:
@@ -967,15 +994,16 @@ def heart_beat():
                     print(f"📉 EXIT SIGNAL: {sym} RSI {curr_rsi:.2f} < 40")
                     broker.sell_all(sym)
 
+
 if __name__ == "__main__":
     init_db()
     print("🚀 Algo-Trading Heart Started...")
     schedule.every(1).minutes.do(heart_beat)
     schedule.every().day.at("21:00").do(daily_summary)
-    
+
     # Run once immediately on startup
     heart_beat()
-    
+
     while True:
         schedule.run_pending()
         time.sleep(1)

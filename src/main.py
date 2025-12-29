@@ -95,10 +95,11 @@ def heart_beat():
                 continue
 
             is_holding = broker.is_holding(sym)
+            has_pending = broker.has_open_order(sym)  # Check for pending orders
 
             # 3. Trade Logic
             # 🟢 BUY
-            if not is_holding:
+            if not is_holding and not has_pending:
                 if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
                     current_price = float(broker.api.get_latest_trade(sym).price)
                     allowed_spend = min(target_usd_per_stock, cash_available)
