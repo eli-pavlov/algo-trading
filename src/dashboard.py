@@ -72,3 +72,14 @@ with tab4:
         
     st.write("### Database Path")
     st.code(DB_PATH)
+
+with tab4: # The Debug Console we created earlier
+    st.subheader("📜 Live Engine Logs")
+    if st.button("🔄 Refresh Logs"):
+        # This reads the last 20 lines of the container logs
+        # Note: This only works if Streamlit has permission to run shell commands
+        try:
+            logs = os.popen("docker logs algo_heart --tail 20").read()
+            st.code(logs, language="text")
+        except:
+            st.error("Cannot access Docker logs from UI. Check permissions.")
