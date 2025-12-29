@@ -6,6 +6,7 @@ import urllib3
 import pandas as pd
 import gc
 import shutil
+from functools import partial
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
@@ -79,7 +80,7 @@ def get_stock_data(symbol):
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
 
-    # 1. Get Data (Scope is clear here)
+    # 1. Get Data
     df = get_stock_data(symbol)
 
     if df is None or df.empty:
@@ -89,8 +90,10 @@ def optimize_stock(symbol, broker):
     # 2. Optimize
     try:
         study = optuna.create_study(direction="maximize")
-        # Now df is definitely defined in this scope
-        study.optimize(lambda trial: objective(trial, df), n_trials=5)
+
+        # Use partial to bind df explicitly, which satisfies the linter
+        optimization_func = partial(objective, df=df)
+        study.optimize(optimization_func, n_trials=5)
 
         print(f"✅ Best for {symbol}: {study.best_params}")
 
