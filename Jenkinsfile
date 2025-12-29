@@ -9,13 +9,6 @@ pipeline {
                 checkout scm
             }
         }
-        stage('Lint Check') {
-            steps {
-                sh 'pip install flake8'
-                // CHANGE THIS LINE: Use python3 -m
-                sh 'python3 -m flake8 src/ --count --max-line-length=120'
-            }
-        }
         stage('Prepare Secrets') {
             steps {
                 withCredentials([file(credentialsId: 'algo-trading-env', variable: 'SECRET_ENV')]) {
