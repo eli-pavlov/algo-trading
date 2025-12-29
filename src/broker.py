@@ -25,7 +25,6 @@ class Broker:
         self.api._session.trust_env = False
         self.api._session.verify = False
 
-    # ... (Keep test_connection, get_market_clock, get_portfolio_history_stats, get_account_stats, get_orders_for_symbol, has_open_order as is) ...
     def test_connection(self):
         try:
             acct = self.api.get_account()
@@ -65,7 +64,8 @@ class Broker:
                 if hist.equity:
                     start = hist.equity[0]
                     end = hist.equity[-1]
-                    if start == 0: start = 1
+                    if start == 0:
+                        start = 1
                     pct = ((end - start) / start) * 100
                     data[label] = f"{pct:+.2f}%"
                 else:
@@ -98,7 +98,7 @@ class Broker:
             return len(orders) > 0
         except Exception:
             return True
-            
+
     def is_holding(self, symbol):
         try:
             return self.api.get_position(symbol)
@@ -120,25 +120,28 @@ class Broker:
         try:
             trade = self.api.get_latest_trade(symbol)
             return float(trade.price)
-        except:
+        except Exception:
             return 0.0
 
     def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
         args = {"symbol": symbol, "qty": qty, "side": side, "type": type, "time_in_force": "gtc"}
-        if limit_px: args['limit_price'] = limit_px
-        if stop_px: args['stop_price'] = stop_px
-        if trail_pct: args['trail_percent'] = trail_pct
+        if limit_px:
+            args['limit_price'] = limit_px
+        if stop_px:
+            args['stop_price'] = stop_px
+        if trail_pct:
+            args['trail_percent'] = trail_pct
 
         try:
             # 1. Snapshot Price BEFORE submitting
             snap_px = self._get_snapshot_price(symbol)
-            
+
             # 2. Submit
             order = self.api.submit_order(**args)
-            
+
             # 3. Log Attempt
             log_trade_attempt(order.id, symbol, side, qty, type, snap_px)
-            
+
             return True, "Order Submitted"
         except Exception as e:
             return False, str(e)
@@ -147,8 +150,9 @@ class Broker:
         try:
             # 1. Snapshot Price
             snap_px = self._get_snapshot_price(sym)
-            if snap_px == 0: return # Safety check
-            
+            if snap_px == 0:
+                return  # Safety check
+
             # 2. Submit
             order = self.api.submit_order(
                 symbol=sym, qty=qty, side='buy', type='market', time_in_force='gtc',
@@ -156,10 +160,10 @@ class Broker:
                 take_profit={'limit_price': round(snap_px * (1 + tp_pct), 2)},
                 stop_loss={'stop_price': round(snap_px * (1 - sl_pct), 2)}
             )
-            
+
             # 3. Log Attempt
             log_trade_attempt(order.id, sym, 'buy', qty, 'market_bracket', snap_px)
-            
+
         except Exception as e:
             print(f"Bracket Error: {e}")
 
@@ -169,7 +173,7 @@ class Broker:
             with sqlite3.connect(DB_PATH) as conn:
                 # Find orders that are NEW (unfilled in our DB)
                 pending = conn.execute("SELECT order_id FROM trade_execution WHERE status='NEW'").fetchall()
-                
+
             for (oid,) in pending:
                 try:
                     # Check Alpaca for status
@@ -177,10 +181,13 @@ class Broker:
                     if o.status == 'filled' and o.filled_avg_price:
                         update_trade_fill(oid, float(o.filled_avg_price), str(o.filled_at))
                     elif o.status in ['canceled', 'expired', 'rejected']:
-                         # Mark as dead in DB so we stop checking
-                         with sqlite3.connect(DB_PATH) as conn:
-                             conn.execute("UPDATE trade_execution SET status=? WHERE order_id=?", (o.status.upper(), oid))
-                except:
+                        # Mark as dead in DB so we stop checking
+                        with sqlite3.connect(DB_PATH) as conn:
+                            conn.execute(
+                                "UPDATE trade_execution SET status=? WHERE order_id=?",
+                                (o.status.upper(), oid)
+                            )
+                except Exception:
                     pass
         except Exception as e:
             print(f"TCA Sync Error: {e}")
