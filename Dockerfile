@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-# FIX: Add trusted-host to bypass the SSL expiry error
+# BYPASS SSL Verification during build
 RUN pip install --no-cache-dir \
     --trusted-host pypi.org \
     --trusted-host pypi.python.org \
@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir \
     -r requirements.txt
 
 COPY . .
+
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
+
 CMD ["python", "src/main.py"]
