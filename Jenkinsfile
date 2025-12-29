@@ -12,7 +12,10 @@ pipeline {
         }
         stage('Lint') {
             steps {
-                sh 'pip install flake8 && flake8 src/'
+                // Install flake8
+                sh 'pip install flake8'
+                // Run flake8 using the python module runner
+                sh 'python3 -m flake8 src/'
             }
         }
         stage('Prepare Secrets') {
