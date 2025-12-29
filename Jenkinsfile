@@ -4,6 +4,15 @@ pipeline {
         DOCKER_IMAGE = "algo-trader"
     }
     stages {
+        stage('Disk Cleanup') {
+            steps {
+                echo "🧹 Cleaning OCI Disk Space..."
+                // Prune builder cache specifically to free up space for pip
+                sh "docker builder prune -f"
+                // Remove images older than 24h
+                sh "docker image prune -a --filter 'until=24h' -f"
+            }
+        }
         stage('Checkout') {
             steps { checkout scm }
         }
