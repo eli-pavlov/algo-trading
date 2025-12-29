@@ -12,15 +12,14 @@ pipeline {
     stages {
         stage('Initialize') {
             steps {
-                echo "🚀 Preparing Fixed Workspace..."
+                echo "🚀 Preparing Workspace at ${DEPLOY_PATH}..."
                 checkout scm
                 
-                // Keep permissions clean every build
+                // Ensure Jenkins maintains ownership
                 sh "sudo chown -R jenkins:jenkins ${DEPLOY_PATH}"
                 
-                echo "🧹 Pruning Docker..."
+                echo "🧹 Pruning Docker Build Cache..."
                 sh "docker builder prune -f"
-                sh "docker image prune -f"
             }
         }
         stage('Prepare Secrets') {
@@ -32,21 +31,24 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                echo "📦 Compiling and Launching..."
+                echo "📦 Building Image & Starting Containers..."
                 sh "docker build --network=host -t ${DOCKER_IMAGE} ."
                 sh "docker compose up -d --remove-orphans"
+                
+                echo "🔄 Restarting services to pick up code changes..."
                 sh "docker compose restart dashboard trading-bot"
                 
-                echo "🎯 Running Auto-Tuner..."
+                echo "🎯 Running Strategy Tuner..."
                 sh "docker exec algo_heart python src/tuner.py"
             }
         }
     }
     post {
         always {
-            // Ensure cleanup runs inside a node context
             node('built-in') {
-                sh "docker image prune -f"
+                script {
+                    sh "docker image prune -f"
+                }
             }
         }
     }
