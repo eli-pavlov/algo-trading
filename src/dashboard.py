@@ -9,21 +9,51 @@ from src.database import get_status, update_status, delete_strategy, DB_PATH
 # 1. Page Config
 st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
 
-# CSS for compact metrics
+# --- CUSTOM CSS: 3D Buttons & Paper Badge ---
 st.markdown("""
 <style>
+    /* 3D Button Styling */
+    div.stButton > button {
+        box-shadow: 0px 4px 0px #4a5568; /* The "3D" shadow */
+        transition: all 0.1s;
+        border: 1px solid #cbd5e0;
+        border-radius: 8px;
+        transform: translateY(0);
+        font-weight: 600;
+    }
+    
+    div.stButton > button:active {
+        transform: translateY(4px); /* Push down effect */
+        box-shadow: 0px 0px 0px #4a5568; /* Shadow disappears */
+    }
+
+    div.stButton > button:hover {
+        border-color: #3182ce;
+        color: #2b6cb0;
+    }
+
+    /* Metric Cards */
     .stMetric {
-        background-color: #f0f2f6;
+        background-color: #f7fafc;
         padding: 10px;
-        border-radius: 5px;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
     }
-    .compact-text {
-        font-size: 0.8rem;
-        color: #555;
-    }
-    .strategy-card {
-        padding: 10px;
-        border-bottom: 1px solid #ddd;
+
+    /* Paper Trading Warning Badge */
+    .paper-badge {
+        background-color: #fffbeb; /* Light yellow */
+        color: #b7791f; /* Dark yellow text */
+        padding: 8px;
+        border-radius: 6px;
+        border: 2px dashed #ecc94b;
+        text-align: center;
+        font-weight: bold;
+        margin-bottom: 15px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-size: 0.85rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -34,6 +64,9 @@ conn_status, conn_msg = broker.test_connection()
 
 # 3. Sidebar
 with st.sidebar:
+    # PAPER TRADING BADGE
+    st.markdown('<div class="paper-badge">⚠️ Alpaca Paper Trading</div>', unsafe_allow_html=True)
+    
     st.title("📡 Overview")
     if conn_status:
         st.success("🟢 API ONLINE")
@@ -49,13 +82,19 @@ with st.sidebar:
     hist = broker.get_portfolio_history_stats()
     st.metric("Total Equity", f"${acc.get('Equity', 0):,.2f}")
     
+    # RESTORED: 4-Grid Layout for Timeframes
     c1, c2 = st.columns(2)
     c1.caption("1 Day"); c1.write(hist.get('1D', 'N/A'))
     c2.caption("1 Week"); c2.write(hist.get('1W', 'N/A'))
     
+    c3, c4 = st.columns(2)
+    c3.caption("1 Month"); c3.write(hist.get('1M', 'N/A'))
+    c4.caption("1 Year"); c4.write(hist.get('1A', 'N/A'))
+    
     st.markdown("---")
     engine_on = get_status("engine_running") == "1"
-    if st.button("🛑 STOP" if engine_on else "🚀 START", use_container_width=True, type="primary" if not engine_on else "secondary"):
+    # Button styling handles the look; logic handles the action
+    if st.button("🛑 STOP ENGINE" if engine_on else "🚀 START ENGINE", use_container_width=True):
         update_status("engine_running", "0" if engine_on else "1")
         st.rerun()
 
@@ -76,6 +115,7 @@ with tab_assets:
         if positions:
             for p in positions:
                 pl_total = float(p.unrealized_pl)
+                # Use columns inside expander header for cleaner look
                 with st.expander(f"{p.symbol} | {p.qty} sh | P/L: ${pl_total:.2f}"):
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Price", f"${float(p.current_price):.2f}")
@@ -92,7 +132,7 @@ with tab_assets:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 2: STRATEGIES (COMPACT & FRIENDLY) ---
+# --- TAB 2: STRATEGIES (Compact & Clean) ---
 with tab_strat:
     with sqlite3.connect(DB_PATH) as conn:
         try:
@@ -105,7 +145,7 @@ with tab_strat:
                 h3.markdown("<small>ADX Min</small>", unsafe_allow_html=True)
                 h4.markdown("<small>Take Profit</small>", unsafe_allow_html=True)
                 h5.markdown("<small>Stop Loss</small>", unsafe_allow_html=True)
-                h6.markdown("") # Action
+                h6.markdown("") # Action placeholder
                 st.divider()
 
                 for index, row in df.iterrows():
@@ -115,21 +155,23 @@ with tab_strat:
                         p = json.loads(row['params'])
                         
                         # Symbol
-                        c1.markdown(f"##### {row['symbol']}")
+                        c1.markdown(f"**{row['symbol']}**")
                         
                         # Metrics (Small text)
-                        c2.markdown(f"{p.get('rsi_trend', '-')}")
-                        c3.markdown(f"{p.get('adx_trend', '-')}")
+                        c2.markdown(f"<small>{p.get('rsi_trend', '-')}</small>", unsafe_allow_html=True)
+                        c3.markdown(f"<small>{p.get('adx_trend', '-')}</small>", unsafe_allow_html=True)
                         
                         # Percentages colored
                         tp = p.get('target', 0) * 100
                         sl = p.get('stop', 0) * 100
-                        c4.markdown(f"<span style='color:green'>+{tp:.1f}%</span>", unsafe_allow_html=True)
-                        c5.markdown(f"<span style='color:red'>-{sl:.1f}%</span>", unsafe_allow_html=True)
+                        c4.markdown(f"<span style='color:green; font-weight:bold'>+{tp:.1f}%</span>", unsafe_allow_html=True)
+                        c5.markdown(f"<span style='color:red; font-weight:bold'>-{sl:.1f}%</span>", unsafe_allow_html=True)
                         
                         # Delete (Icon only button)
                         if c6.button("🗑️", key=f"del_{row['symbol']}", help="Remove Strategy"):
                             delete_strategy(row['symbol'])
+                            st.toast(f"Removed {row['symbol']}")
+                            time.sleep(0.5)
                             st.rerun()
                             
                     except:
@@ -138,30 +180,35 @@ with tab_strat:
                     st.markdown("<hr style='margin: 5px 0; border-top: 1px solid #eee;'>", unsafe_allow_html=True)
 
             else:
-                st.info("No strategies active.")
+                st.info("No strategies active. Run the scanner to populate.")
         except Exception as e:
             st.error(f"DB Error: {e}")
 
 # --- TAB 3: MANUAL ---
 with tab_manual:
     with st.form("manual_trade"):
+        st.subheader("Manual Trade Execution")
         c1, c2, c3 = st.columns(3)
         sym = c1.text_input("Symbol", "TSLA").upper()
-        qty = c2.number_input("Qty", 0.1, 1000.0, 1.0)
+        qty = c2.number_input("Qty", 0.1, 10000.0, 1.0)
         side = c3.selectbox("Side", ["buy", "sell"])
         
         c4, c5 = st.columns(2)
         type = c4.selectbox("Type", ["market", "limit", "stop", "trailing_stop"])
-        px = c5.number_input("Price/Trail%", 0.0)
+        px = c5.number_input("Price / Trail %", 0.0)
         
-        if st.form_submit_button("Submit Order"):
+        if st.form_submit_button("🚀 Submit Order"):
             l_px = px if type == 'limit' else None
             s_px = px if type == 'stop' else None
             t_pct = px if type == 'trailing_stop' else None
             
             ok, msg = broker.submit_manual_order(sym, qty, side, type, l_px, s_px, t_pct)
-            if ok: st.success(msg); time.sleep(1); st.rerun()
-            else: st.error(msg)
+            if ok: 
+                st.success(msg)
+                time.sleep(1)
+                st.rerun()
+            else: 
+                st.error(msg)
 
 # --- TAB 4: DEBUG ---
 with tab_debug:
