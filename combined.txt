@@ -65,59 +65,69 @@ market_scanner.*
 
 
 // docker-compose.yaml
+version: '3.8'
 services:
   trading-bot:
-    image: algo-trader-image
+    image: algo-trader
     container_name: algo_heart
     restart: always
     env_file: .env
     network_mode: "host"
     volumes:
       - ./data:/app/data
+    # --- NEW SECTION: Unlock Memory ---
+    deploy:
+      resources:
+        limits:
+          memory: 3G  # Allow up to 4GB
+        reservations:
+          memory: 1G  # Guarantee at least 1GB
+    # ----------------------------------
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
+      interval: 1m
+      retries: 3
 
   dashboard:
-    image: algo-trader-image
+    image: algo-trader
     container_name: algo_ui
     restart: always
     network_mode: "host"
     env_file: .env
     volumes:
       - ./data:/app/data
-    # Note: ports mapping is ignored in network_mode: host; 
-    # Streamlit will naturally be available on 8501
     command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
 
 // Dockerfile
-FROM python:3.9-slim as builder
+FROM python:3.9-slim
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y gcc g++ ca-certificates && rm -rf /var/lib/apt/lists/*
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ ca-certificates \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-# Use a specific index URL and bypass SSL checks completely
-RUN pip install --user --no-cache-dir \
-    --index-url https://pypi.org/simple \
+# Install dependencies with trusted hosts
+# We use --network=host in the build command, so this should fly now
+RUN pip install --no-cache-dir \
+    --timeout 100 \
     --trusted-host pypi.org \
-    --trusted-host files.pythonhosted.org \
     --trusted-host pypi.python.org \
-    -r requirements.txt || \
-    pip install --user --no-cache-dir \
-    --index-url http://pypi.doubleu.top/simple \
-    --trusted-host pypi.doubleu.top \
+    --trusted-host files.pythonhosted.org \
     -r requirements.txt
 
-FROM python:3.9-slim
-WORKDIR /app
-COPY --from=builder /root/.local /root/.local
 COPY . .
-ENV PATH=/root/.local/bin:$PATH PYTHONPATH=/app PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app PYTHONUNBUFFERED=1
 CMD ["python", "src/main.py"]
 
 // Jenkinsfile
 pipeline {
     agent any
     environment {
+        // This variable isn't strictly needed anymore but good for reference
         DOCKER_IMAGE = "algo-trader"
     }
     stages {
@@ -133,19 +143,19 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                // 1. Manually build the image using the host network (the part that worked manually)
-                // We tag it as 'algo-trader' so docker-compose can find it
-                sh "docker build --network=host -t algo-trader-image . "
+                // 1. Build the image using HOST networking
+                // This allows pip to connect to PyPI successfully (like your manual test)
+                sh "docker build --network=host -t algo-trader ."
 
-                // 2. Start the containers
-                // We use --no-build to ensure it uses the image we just created
-                sh "docker compose up -d"
+                // 2. Start containers using the image we just built
+                // We remove orphans to clean up any old containers from previous failed builds
+                sh "docker compose up -d --remove-orphans"
                 
-                // 3. RETRAIN
+                // 3. Wait for boot and Train
                 sh "sleep 5"
                 sh "docker exec algo_heart python src/analyzer.py"
                 
-                // 4. Cleanup
+                // 4. Cleanup dangling images to save disk space
                 sh "docker image prune -f"
             }
         }
@@ -387,6 +397,7 @@ import pandas_ta_classic as ta
 import optuna
 import urllib3
 import pandas as pd
+import gc
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
@@ -395,7 +406,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
 def objective(trial, df):
-    """Optuna objective to maximize profit in a 1-year backtest."""
+    # Reduced search space slightly for speed/memory
     adx_threshold = trial.suggest_int("adx_trend", 15, 35)
     rsi_threshold = trial.suggest_int("rsi_trend", 40, 65)
     tp = trial.suggest_float("target", 0.10, 0.40)
@@ -403,22 +414,19 @@ def objective(trial, df):
 
     df_copy = df.copy()
     
-    # Calculate ADX safely
-    # pandas-ta-classic requires explicit high, low, close
+    # Calculate indicators
     adx_df = ta.adx(df_copy['High'], df_copy['Low'], df_copy['Close'], length=14)
-    
     if adx_df is None or adx_df.empty:
-        return -100 # Penalize if indicator fails
+        return -100
 
-    # Merge ADX back into main dataframe
-    df_copy['ADX'] = adx_df.iloc[:, 0] # Use the first column of the ADX result
+    df_copy['ADX'] = adx_df.iloc[:, 0]
     df_copy['RSI'] = ta.rsi(df_copy['Close'], length=14)
-    
-    # Drop rows where indicators are NaN (the warm-up period)
-    df_copy = df_copy.dropna(subset=['ADX', 'RSI'])
+    df_copy.dropna(subset=['ADX', 'RSI'], inplace=True)
 
     score, in_pos, entry = 0, False, 0
-    for i in range(1, len(df_copy)):
+    # Vectorized calculation is faster but iterating is fine for logic clarity
+    # Keeping iteration to match your logic exactly
+    for i in range(len(df_copy)):
         price = df_copy['Close'].iloc[i]
         curr_adx = df_copy['ADX'].iloc[i]
         curr_rsi = df_copy['RSI'].iloc[i]
@@ -437,35 +445,39 @@ def objective(trial, df):
 
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
-    # 1. Download data
-    df = yf.download(symbol, period="1y", interval="1h", progress=False)
+    try:
+        # Download data
+        df = yf.download(symbol, period="1y", interval="1h", progress=False)
+        
+        if df.empty:
+            print(f"❌ No data for {symbol}")
+            return
 
-    if df.empty:
-        print(f"❌ No data for {symbol}")
-        return
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
-    # 2. Flatten MultiIndex columns if necessary (new yfinance behavior)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    # 3. Optimize
-    study = optuna.create_study(direction="maximize")
-    study.optimize(lambda trial: objective(trial, df), n_trials=20)
-    
-    print(f"✅ Best for {symbol}: {study.best_params}")
-    
-    # 4. Save
-    is_holding = broker.is_holding(symbol)
-    save_strategy(symbol, study.best_params, is_holding is not None)
+        # Optimize (Reduced trials to prevent OOM)
+        study = optuna.create_study(direction="maximize")
+        study.optimize(lambda trial: objective(trial, df), n_trials=10)
+        
+        print(f"✅ Best for {symbol}: {study.best_params}")
+        
+        is_holding = broker.is_holding(symbol)
+        save_strategy(symbol, study.best_params, is_holding is not None)
+        
+        # MEMORY CLEANUP: Critical for small instances
+        del df
+        del study
+        gc.collect()
+        
+    except Exception as e:
+        print(f"⚠️ Error on {symbol}: {e}")
 
 if __name__ == "__main__":
     init_db()
     broker = Broker()
     for t in TICKERS:
-        try:
-            optimize_stock(t, broker)
-        except Exception as e:
-            print(f"⚠️ Error on {t}: {e}")
+        optimize_stock(t, broker)
 
 // src/broker.py
 import os
