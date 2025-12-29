@@ -167,7 +167,7 @@ pipeline {
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
 
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+   TERMS AND CONDITIONS FOR USE, REPRODUCTIO  AND DISTRIBUTION
 
    1. Definitions.
 
@@ -398,6 +398,7 @@ import optuna
 import urllib3
 import pandas as pd
 import gc
+import shutil
 from src.database import save_strategy, init_db
 from src.broker import Broker
 
@@ -406,26 +407,30 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
 def objective(trial, df):
-    # Reduced search space slightly for speed/memory
-    adx_threshold = trial.suggest_int("adx_trend", 15, 35)
-    rsi_threshold = trial.suggest_int("rsi_trend", 40, 65)
-    tp = trial.suggest_float("target", 0.10, 0.40)
-    sl = trial.suggest_float("stop", 0.03, 0.15)
+    # Reduced search space for stability
+    adx_threshold = trial.suggest_int("adx_trend", 20, 30)
+    rsi_threshold = trial.suggest_int("rsi_trend", 45, 60)
+    tp = trial.suggest_float("target", 0.10, 0.30)
+    sl = trial.suggest_float("stop", 0.05, 0.10)
 
     df_copy = df.copy()
     
-    # Calculate indicators
-    adx_df = ta.adx(df_copy['High'], df_copy['Low'], df_copy['Close'], length=14)
-    if adx_df is None or adx_df.empty:
+    # Check for valid data length for indicators
+    if len(df_copy) < 50: return -100
+
+    # Calculate ADX safely
+    try:
+        adx_df = ta.adx(df_copy['High'], df_copy['Low'], df_copy['Close'], length=14)
+        if adx_df is None or adx_df.empty: return -100
+        
+        # Use position-based indexing (safer than name-based)
+        df_copy['ADX'] = adx_df.iloc[:, 0]
+        df_copy['RSI'] = ta.rsi(df_copy['Close'], length=14)
+        df_copy.dropna(subset=['ADX', 'RSI'], inplace=True)
+    except Exception:
         return -100
 
-    df_copy['ADX'] = adx_df.iloc[:, 0]
-    df_copy['RSI'] = ta.rsi(df_copy['Close'], length=14)
-    df_copy.dropna(subset=['ADX', 'RSI'], inplace=True)
-
     score, in_pos, entry = 0, False, 0
-    # Vectorized calculation is faster but iterating is fine for logic clarity
-    # Keeping iteration to match your logic exactly
     for i in range(len(df_copy)):
         price = df_copy['Close'].iloc[i]
         curr_adx = df_copy['ADX'].iloc[i]
@@ -446,8 +451,8 @@ def objective(trial, df):
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
     try:
-        # Download data
-        df = yf.download(symbol, period="1y", interval="1h", progress=False)
+        # Download data with threads=False to prevent CFFI/Curl crashes on ARM
+        df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False)
         
         if df.empty:
             print(f"❌ No data for {symbol}")
@@ -456,16 +461,16 @@ def optimize_stock(symbol, broker):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Optimize (Reduced trials to prevent OOM)
+        # Optimize with fewer trials to save RAM
         study = optuna.create_study(direction="maximize")
-        study.optimize(lambda trial: objective(trial, df), n_trials=10)
+        study.optimize(lambda trial: objective(trial, df), n_trials=5)
         
         print(f"✅ Best for {symbol}: {study.best_params}")
         
         is_holding = broker.is_holding(symbol)
         save_strategy(symbol, study.best_params, is_holding is not None)
         
-        # MEMORY CLEANUP: Critical for small instances
+        # Aggressive Cleanup
         del df
         del study
         gc.collect()
@@ -475,6 +480,12 @@ def optimize_stock(symbol, broker):
 
 if __name__ == "__main__":
     init_db()
+    
+    # Clear yfinance cache to prevent corruption errors
+    cache_dir = os.path.expanduser("~/.cache/yfinance")
+    if os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir)
+        
     broker = Broker()
     for t in TICKERS:
         optimize_stock(t, broker)
@@ -500,45 +511,61 @@ class Broker:
             base_url=self.base_url,
             api_version='v2'
         )
+        # Trust env False prevents Jenkins proxy issues
         self.api._session.trust_env = False
         self.api._session.verify = False
 
     def test_connection(self):
         try:
             acct = self.api.get_account()
-            return True, f"🟢 Connected (ID: {acct.id})"
+            return True, f"Connected to {acct.id}"
         except Exception as e:
-            return False, f"🔴 Error: {str(e)}"
+            return False, str(e)
 
     def get_market_clock(self):
-        """Returns market status and time to open/close."""
+        """Returns clean market status message."""
         try:
             clock = self.api.get_clock()
             now = clock.timestamp.replace(tzinfo=timezone.utc)
             
             if clock.is_open:
+                # Calculate time to close
                 close_time = clock.next_close.replace(tzinfo=timezone.utc)
-                delta = close_time - now
-                msg = f"🟢 Market Open (Closes in {str(delta).split('.')[0]})"
+                diff = close_time - now
+                hours, remainder = divmod(diff.seconds, 3600)
+                mins, _ = divmod(remainder, 60)
+                return f"🟢 Market Open (Closes in {hours}h {mins}m)"
             else:
+                # Calculate time to open
                 open_time = clock.next_open.replace(tzinfo=timezone.utc)
-                delta = open_time - now
-                msg = f"🔴 Market Closed (Opens in {str(delta).split('.')[0]})"
-            return msg
+                diff = open_time - now
+                days = diff.days
+                hours, remainder = divmod(diff.seconds, 3600)
+                mins, _ = divmod(remainder, 60)
+                
+                if days > 0:
+                    return f"🔴 Market Closed (Opens in {days} days, {hours}h {mins}m)"
+                else:
+                    return f"🔴 Market Closed (Opens in {hours}h {mins}m)"
         except:
             return "🟠 Market Status Unavailable"
 
+    # ... (Keep get_portfolio_history_stats, get_account_stats, submit_manual_order as they were) ...
+    # ... (Keep get_orders_for_symbol, is_holding, sell_all, buy_bracket from previous version) ...
+    
     def get_portfolio_history_stats(self):
         """Fetches 1D, 1W, 1M, 1A performance."""
+        # Note: '1A' might fail on some accounts, handled by try/except in loop
         periods = {'1D': '1D', '1W': '1W', '1M': '1M', '1A': '1A'}
         data = {}
         for label, p in periods.items():
             try:
-                # '1A' isn't standard in some versions, defaulting to '1M' if fails
                 hist = self.api.get_portfolio_history(period=p, timeframe="1D")
                 if hist.equity:
                     start = hist.equity[0]
                     end = hist.equity[-1]
+                    # Handle division by zero if account is new/empty
+                    if start == 0: start = 1 
                     pct = ((end - start) / start) * 100
                     data[label] = f"{pct:+.2f}%"
                 else:
@@ -559,28 +586,18 @@ class Broker:
             return {}
 
     def get_orders_for_symbol(self, symbol):
-        """Fetches active Stop Loss / Take Profit orders for a symbol."""
         try:
             orders = self.api.list_orders(status='open', symbols=[symbol])
+            # Format: "STOP sell @ 150.00"
             return [f"{o.type.upper()} {o.side} @ {o.limit_price or o.stop_price}" for o in orders]
         except:
             return []
 
     def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
-        """Handles all API order types."""
-        args = {
-            "symbol": symbol,
-            "qty": qty,
-            "side": side,
-            "type": type,
-            "time_in_force": "gtc"
-        }
-        if type == 'limit': args['limit_price'] = limit_px
-        if type == 'stop': args['stop_price'] = stop_px
-        if type == 'stop_limit':
-            args['stop_price'] = stop_px
-            args['limit_price'] = limit_px
-        if type == 'trailing_stop': args['trail_percent'] = trail_pct
+        args = {"symbol": symbol, "qty": qty, "side": side, "type": type, "time_in_force": "gtc"}
+        if limit_px: args['limit_price'] = limit_px
+        if stop_px: args['stop_price'] = stop_px
+        if trail_pct: args['trail_percent'] = trail_pct
 
         try:
             self.api.submit_order(**args)
@@ -588,7 +605,6 @@ class Broker:
         except Exception as e:
             return False, str(e)
 
-    # ... (Keep existing is_holding / sell_all / buy_bracket for the bot logic) ...
     def is_holding(self, symbol):
         try: return self.api.get_position(symbol)
         except: return None
@@ -619,118 +635,161 @@ import time
 from src.broker import Broker
 from src.database import get_status, update_status, DB_PATH
 
+# 1. Page Config
 st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
 
-# Initialize Broker
+# 2. Broker Init
 broker = Broker()
+conn_status, conn_msg = broker.test_connection()
 
-# --- HEADER: Market Clock ---
-st.markdown(f"### 🕒 {broker.get_market_clock()}")
-st.markdown("---")
+# 3. Sidebar: The New "Overview" Home
+with st.sidebar:
+    st.title("📡 System Overview")
+    
+    if conn_status:
+        st.success("API Status: 🟢 ONLINE")
+    else:
+        st.error(f"API Status: 🔴 DISCONNECTED\n{conn_msg}")
+        
+    st.markdown("---")
+    
+    # Live Account Metrics
+    acc = broker.get_account_stats()
+    c1, c2 = st.columns(2)
+    c1.metric("Buying Power", f"${acc.get('Power', 0):,.2f}")
+    c2.metric("Cash", f"${acc.get('Cash', 0):,.2f}")
+    
+    st.markdown("---")
+    st.subheader("📈 Performance")
+    
+    # Portfolio History
+    hist = broker.get_portfolio_history_stats()
+    st.metric("Total Equity", f"${acc.get('Equity', 0):,.2f}")
+    
+    # Compact Grid for Timeframes
+    h1, h2 = st.columns(2)
+    h1.metric("1 Day", hist.get('1D', 'N/A'))
+    h2.metric("1 Week", hist.get('1W', 'N/A'))
+    h3, h4 = st.columns(2)
+    h3.metric("1 Month", hist.get('1M', 'N/A'))
+    h4.metric("1 Year", hist.get('1A', 'N/A'))
+    
+    st.markdown("---")
+    
+    # Engine Control
+    engine_on = get_status("engine_running") == "1"
+    btn_label = "🛑 STOP ENGINE" if engine_on else "🚀 START ENGINE"
+    if st.button(btn_label, use_container_width=True):
+        update_status("engine_running", "0" if engine_on else "1")
+        st.rerun()
 
-# --- TOP ROW: Portfolio Performance ---
-col1, col2, col3, col4, col5 = st.columns(5)
-acc = broker.get_account_stats()
-hist = broker.get_portfolio_history_stats()
+# 4. Main Header: Market Clock
+clock_msg = broker.get_market_clock()
+if "🟢" in clock_msg:
+    st.info(f"### {clock_msg}")
+else:
+    st.warning(f"### {clock_msg}")
 
-with col1: st.metric("Total Equity", f"${acc.get('Equity', 0):,.2f}")
-with col2: st.metric("Day P/L", hist.get('1D', 'N/A'))
-with col3: st.metric("Week P/L", hist.get('1W', 'N/A'))
-with col4: st.metric("Month P/L", hist.get('1M', 'N/A'))
-with col5: st.metric("Year P/L", hist.get('1A', 'N/A'))
+# 5. Main Tabs
+tab_assets, tab_strat, tab_manual, tab_debug = st.tabs([
+    "📊 Assets & Performance", 
+    "⚙️ Strategies", 
+    "🕹️ Manual Control", 
+    "🔍 Debug"
+])
 
-# --- MAIN TABS ---
-tab_assets, tab_strat, tab_manual, tab_debug = st.tabs(["📊 Assets & Orders", "⚙️ Strategies", "🕹️ Manual Control", "🔍 Debug"])
-
-# 1. ASSETS TAB
+# --- TAB 1: ASSETS ---
 with tab_assets:
-    st.subheader("Active Holdings & Open Orders")
+    st.subheader("Holdings & Active Orders")
     try:
         positions = broker.api.list_positions()
         if positions:
             for p in positions:
-                with st.expander(f"{p.symbol} | {p.qty} shares | P/L: ${float(p.unrealized_pl):.2f} ({float(p.unrealized_plpc)*100:.2f}%)"):
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.write(f"**Current Price:** ${float(p.current_price):.2f}")
-                    c2.write(f"**Avg Entry:** ${float(p.avg_entry_price):.2f}")
-                    c3.write(f"**Market Value:** ${float(p.market_value):.2f}")
-                    c4.write(f"**Day P/L:** ${float(p.unrealized_intraday_pl):.2f}")
+                # Custom calculation for day P/L vs Total P/L
+                pl_day = float(p.unrealized_intraday_pl)
+                pl_total = float(p.unrealized_pl)
+                
+                # Visual Expander
+                with st.expander(f"{p.symbol} | {p.qty} shares | Total P/L: ${pl_total:.2f}"):
+                    # Metrics Grid
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Current Price", f"${float(p.current_price):.2f}")
+                    m2.metric("Avg Entry", f"${float(p.avg_entry_price):.2f}")
+                    m3.metric("Day P/L", f"${pl_day:.2f}", delta=pl_day)
+                    m4.metric("Total P/L", f"${pl_total:.2f}", delta=pl_total)
                     
-                    # Fetch Open Orders for this symbol
+                    st.divider()
+                    
+                    # Open Orders Section
+                    st.markdown("**⚠️ Active Stops & Limits**")
                     open_orders = broker.get_orders_for_symbol(p.symbol)
-                    st.write("---")
-                    st.write("**⚠️ Active Orders (Stop Loss / Take Profit):**")
                     if open_orders:
                         for o in open_orders:
-                            st.code(o)
+                            st.code(o, language="text")
                     else:
-                        st.caption("No active open orders.")
+                        st.caption("No active orders for this symbol.")
         else:
             st.info("No active positions.")
     except Exception as e:
         st.error(f"Error fetching assets: {e}")
 
-# 2. STRATEGIES TAB
+# --- TAB 2: STRATEGIES ---
 with tab_strat:
-    st.subheader("Strategy Parameters")
+    st.subheader("Active Bot Strategies")
     with sqlite3.connect(DB_PATH) as conn:
         try:
             df = pd.read_sql("SELECT * FROM strategies", conn)
             st.dataframe(df, use_container_width=True)
         except:
-            st.warning("Database empty or locked.")
+            st.warning("Strategy database is empty.")
 
-# 3. MANUAL CONTROL TAB (Enhanced)
+# --- TAB 3: MANUAL CONTROL ---
 with tab_manual:
-    st.subheader("🕹️ Advanced Order Entry")
+    st.subheader("🕹️ Place Trade")
     
-    c_sym, c_qty, c_side = st.columns(3)
-    sym = c_sym.text_input("Symbol", "TSLA").upper()
-    qty = c_qty.number_input("Quantity", min_value=0.1, value=1.0)
-    side = c_side.selectbox("Side", ["buy", "sell"])
-    
-    c_type, c_param = st.columns([1, 2])
-    type = c_type.selectbox("Order Type", ["market", "limit", "stop", "stop_limit", "trailing_stop"])
-    
-    # Dynamic inputs based on order type
-    limit_px, stop_px, trail_pct = None, None, None
-    if type == "limit":
-        limit_px = c_param.number_input("Limit Price", min_value=0.01)
-    elif type == "stop":
-        stop_px = c_param.number_input("Stop Price", min_value=0.01)
-    elif type == "stop_limit":
-        col_sl1, col_sl2 = c_param.columns(2)
-        stop_px = col_sl1.number_input("Stop Price", min_value=0.01)
-        limit_px = col_sl2.number_input("Limit Price", min_value=0.01)
-    elif type == "trailing_stop":
-        trail_pct = c_param.number_input("Trail Percent (%)", min_value=0.1, max_value=100.0)
+    with st.form("manual_order_form"):
+        c1, c2, c3 = st.columns(3)
+        sym = c1.text_input("Symbol", "TSLA").upper()
+        qty = c2.number_input("Qty", min_value=0.1, value=1.0)
+        side = c3.selectbox("Side", ["buy", "sell"])
+        
+        c4, c5 = st.columns(2)
+        type = c4.selectbox("Order Type", ["market", "limit", "stop", "stop_limit", "trailing_stop"])
+        
+        # Dynamic inputs logic would go here, but forms require static layout
+        # We put all potential inputs in one row for simplicity in the form
+        limit_px = c5.number_input("Limit Price (Optional)", min_value=0.0)
+        stop_px = c5.number_input("Stop Price (Optional)", min_value=0.0)
+        trail_pct = c5.number_input("Trail % (Optional)", min_value=0.0)
+        
+        submitted = st.form_submit_button("🚀 Submit Order", type="primary")
+        
+        if submitted:
+            # Filter inputs based on type
+            l_px = limit_px if type in ['limit', 'stop_limit'] else None
+            s_px = stop_px if type in ['stop', 'stop_limit'] else None
+            t_pct = trail_pct if type == 'trailing_stop' else None
 
-    if st.button("🚀 SUBMIT ORDER", type="primary"):
-        with st.spinner("Transmitting to Alpaca..."):
-            success, msg = broker.submit_manual_order(sym, qty, side, type, limit_px, stop_px, trail_pct)
+            success, msg = broker.submit_manual_order(sym, qty, side, type, l_px, s_px, t_pct)
+            
             if success:
                 st.success(f"✅ {msg}")
-                time.sleep(1) # Wait for Alpaca to process
-                st.rerun()    # Force UI Refresh
+                # REFRESH LOGIC: Wait 1s for Alpaca, then reload
+                with st.spinner("Refreshing Portfolio..."):
+                    time.sleep(1) 
+                    st.rerun()
             else:
                 st.error(f"❌ {msg}")
 
-# 4. DEBUG TAB
+# --- TAB 4: DEBUG ---
 with tab_debug:
-    conn_status, conn_msg = broker.test_connection()
-    st.write(f"**Connection:** {conn_msg}")
-    
-    engine_on = get_status("engine_running") == "1"
-    btn_txt = "🛑 STOP AUTOMATED ENGINE" if engine_on else "♻️ START AUTOMATED ENGINE"
-    if st.button(btn_txt):
-        update_status("engine_running", "0" if engine_on else "1")
-        st.rerun()
-
-# --- SIDEBAR INFO ---
-st.sidebar.title("Overview")
-st.sidebar.info(f"**Buying Power:** ${acc.get('Power', 0):,.2f}")
-st.sidebar.info(f"**Cash:** ${acc.get('Cash', 0):,.2f}")
-st.sidebar.caption("Auto-refreshing on interaction")
+    st.write("System Status:")
+    st.json({
+        "DB Path": DB_PATH,
+        "Connected": conn_status,
+        "Engine Running": engine_on,
+        "Last API Message": conn_msg
+    })
 
 // src/database.py
 import sqlite3
@@ -800,6 +859,7 @@ import os
 import sqlite3
 import json
 import yfinance as yf
+import pandas as pd # Needed for MultiIndex check
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, DB_PATH
@@ -814,7 +874,7 @@ def process_manual_queue(broker):
             for o in orders:
                 o_id, sym, qty, side, o_type = o
                 try:
-                    broker.api.submit_order(symbol=sym, qty=qty, side=side, type=o_type, time_in_force='gtc')
+                    broker.submit_manual_order(sym, qty, side, o_type)
                     conn.execute("UPDATE manual_orders SET status='COMPLETED' WHERE id=?", (o_id,))
                 except Exception:
                     conn.execute("UPDATE manual_orders SET status='FAILED' WHERE id=?", (o_id,))
@@ -825,21 +885,22 @@ def daily_summary():
     broker = Broker()
     try:
         stats = broker.get_account_stats()
-        perf = broker.get_performance_summary()
-        broker.send_webhook_report(stats, title="📊 END OF DAY STATS")
-        broker.send_webhook_report(perf, title="📈 PERFORMANCE SUMMARY")
+        perf = broker.get_portfolio_history_stats() # Updated to use the new method
+        # Placeholder for webhook logic if you implement notifications later
+        print(f"Daily Stats: {stats}") 
     except Exception:
         pass
 
 def heart_beat():
+    # Health signal for Docker
     with open("/tmp/heartbeat", "w") as f:
         f.write(str(time.time()))
 
     broker = Broker()
     try:
-        clock = broker.api.get_clock()
-        market_open = clock.is_open
-        update_status("api_health", "🟢 ONLINE" if market_open else "🟡 MARKET CLOSED")
+        msg = broker.get_market_clock()
+        market_open = "🟢" in msg
+        update_status("api_health", msg)
     except Exception:
         update_status("api_health", "🔴 API DISCONNECTED")
         return
@@ -851,46 +912,59 @@ def heart_beat():
 
     if market_open:
         strategies = get_strategies()
-        # Calculate how many potential symbols we are tracking
         num_symbols = len(strategies) if len(strategies) > 0 else 1
         
         account = broker.api.get_account()
         total_equity = float(account.portfolio_value)
         cash_available = float(account.cash)
         
-        # Equal-Weight Logic: Split total equity by number of tracked stocks
+        # Equal-Weight Logic
         target_usd_per_stock = total_equity / num_symbols
 
         for sym, p in strategies.items():
-            df = yf.download(sym, period="5d", interval="1h", progress=False)
+            # 1. Download Data
+            # threads=False prevents the ARM cffi crash
+            df = yf.download(sym, period="5d", interval="1h", progress=False, threads=False)
+            
             if df.empty:
                 continue
 
-            adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
-            rsi_gen = RSIIndicator(close=df['Close'], window=14)
-            curr_rsi = rsi_gen.rsi().iloc[-1]
-            curr_adx = adx_gen.adx().iloc[-1]
+            # --- CRITICAL FIX: Flatten MultiIndex Columns ---
+            # This converts 2D frame (Price, Ticker) -> 1D Series (Price)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            # ------------------------------------------------
+
+            # 2. Calculate Indicators
+            try:
+                adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
+                rsi_gen = RSIIndicator(close=df['Close'], window=14)
+                
+                curr_rsi = rsi_gen.rsi().iloc[-1]
+                curr_adx = adx_gen.adx().iloc[-1]
+            except Exception as e:
+                print(f"⚠️ Indiccalc error {sym}: {e}")
+                continue
 
             is_holding = broker.is_holding(sym)
 
-            # 🟢 BUY LOGIC
+            # 3. Trade Logic
+            # 🟢 BUY
             if not is_holding:
                 if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
                     current_price = float(broker.api.get_latest_trade(sym).price)
-                    
-                    # Spend the target amount, limited by actual cash on hand
                     allowed_spend = min(target_usd_per_stock, cash_available)
                     qty_to_buy = int(allowed_spend / current_price)
 
                     if qty_to_buy > 0:
+                        print(f"🚀 BUY SIGNAL: {sym} @ ${current_price}")
                         broker.buy_bracket(sym, qty_to_buy, p['target'], p['stop'])
                         cash_available -= (qty_to_buy * current_price)
 
-            # 🔴 EXIT LOGIC (Per Symbol)
+            # 🔴 SELL (Exit Signal)
             elif is_holding:
-                # If RSI falls below 40, we exit the WHOLE position for this symbol
                 if curr_rsi < 40:
-                    print(f"📉 Exit Signal for {sym}: RSI {curr_rsi:.2f} < 40")
+                    print(f"📉 EXIT SIGNAL: {sym} RSI {curr_rsi:.2f} < 40")
                     broker.sell_all(sym)
 
 if __name__ == "__main__":
@@ -898,7 +972,10 @@ if __name__ == "__main__":
     print("🚀 Algo-Trading Heart Started...")
     schedule.every(1).minutes.do(heart_beat)
     schedule.every().day.at("21:00").do(daily_summary)
+    
+    # Run once immediately on startup
     heart_beat()
+    
     while True:
         schedule.run_pending()
         time.sleep(1)

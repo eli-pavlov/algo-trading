@@ -4,11 +4,12 @@ import os
 import sqlite3
 import json
 import yfinance as yf
-import pandas as pd # Needed for MultiIndex check
+import pandas as pd  # Needed for MultiIndex check
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, DB_PATH
 from src.broker import Broker
+
 
 def process_manual_queue(broker):
     try:
@@ -26,15 +27,17 @@ def process_manual_queue(broker):
     except Exception as e:
         print(f"Error in manual queue: {e}")
 
+
 def daily_summary():
     broker = Broker()
     try:
         stats = broker.get_account_stats()
-        perf = broker.get_portfolio_history_stats() # Updated to use the new method
+        perf = broker.get_portfolio_history_stats()  # Updated to use the new method
         # Placeholder for webhook logic if you implement notifications later
-        print(f"Daily Stats: {stats}") 
+        print(f"Daily Stats: {stats} | Performance: {perf}")
     except Exception:
         pass
+
 
 def heart_beat():
     # Health signal for Docker
@@ -58,11 +61,11 @@ def heart_beat():
     if market_open:
         strategies = get_strategies()
         num_symbols = len(strategies) if len(strategies) > 0 else 1
-        
+
         account = broker.api.get_account()
         total_equity = float(account.portfolio_value)
         cash_available = float(account.cash)
-        
+
         # Equal-Weight Logic
         target_usd_per_stock = total_equity / num_symbols
 
@@ -70,7 +73,7 @@ def heart_beat():
             # 1. Download Data
             # threads=False prevents the ARM cffi crash
             df = yf.download(sym, period="5d", interval="1h", progress=False, threads=False)
-            
+
             if df.empty:
                 continue
 
@@ -84,7 +87,7 @@ def heart_beat():
             try:
                 adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
                 rsi_gen = RSIIndicator(close=df['Close'], window=14)
-                
+
                 curr_rsi = rsi_gen.rsi().iloc[-1]
                 curr_adx = adx_gen.adx().iloc[-1]
             except Exception as e:
@@ -112,15 +115,16 @@ def heart_beat():
                     print(f"📉 EXIT SIGNAL: {sym} RSI {curr_rsi:.2f} < 40")
                     broker.sell_all(sym)
 
+
 if __name__ == "__main__":
     init_db()
     print("🚀 Algo-Trading Heart Started...")
     schedule.every(1).minutes.do(heart_beat)
     schedule.every().day.at("21:00").do(daily_summary)
-    
+
     # Run once immediately on startup
     heart_beat()
-    
+
     while True:
         schedule.run_pending()
         time.sleep(1)
