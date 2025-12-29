@@ -1,23 +1,21 @@
 services:
   trading-bot:
-    build:
-      context: .
+    image: algo-trader-image
     container_name: algo_heart
     restart: always
     env_file: .env
-    network_mode: "host" # Use host network to ensure it can see the internet like the host does
+    network_mode: "host"
     volumes:
       - ./data:/app/data
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
 
   dashboard:
-    build:
-      context: .
+    image: algo-trader-image
     container_name: algo_ui
+    restart: always
     network_mode: "host"
     env_file: .env
     volumes:
       - ./data:/app/data
+    # Note: ports mapping is ignored in network_mode: host; 
+    # Streamlit will naturally be available on 8501
     command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0

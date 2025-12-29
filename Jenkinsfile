@@ -16,16 +16,19 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                // We use --build-arg and --network host to bridge the connection gap
-                sh "docker compose build --no-cache --pull --build-arg HTTP_PROXY='' --build-arg HTTPS_PROXY=''"
-                
-                // This is the key: manually building with host network if compose fails to bridge
-                sh "docker build --network=host -t algo-trader-bot . "
+                // 1. Manually build the image using the host network (the part that worked manually)
+                // We tag it as 'algo-trader' so docker-compose can find it
+                sh "docker build --network=host -t algo-trader-image . "
 
+                // 2. Start the containers
+                // We use --no-build to ensure it uses the image we just created
                 sh "docker compose up -d"
                 
+                // 3. RETRAIN
                 sh "sleep 5"
                 sh "docker exec algo_heart python src/analyzer.py"
+                
+                // 4. Cleanup
                 sh "docker image prune -f"
             }
         }
