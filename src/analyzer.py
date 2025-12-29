@@ -1,6 +1,6 @@
 import os
 import yfinance as yf
-import pandas_ta as ta
+import pandas_ta_classic as ta  # <-- CHANGE THIS LINE
 import optuna
 import urllib3
 from src.database import save_strategy, init_db
