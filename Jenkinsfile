@@ -27,7 +27,7 @@ pipeline {
                 
                 // 3. Wait for boot and Train
                 sh "sleep 5"
-                sh "docker exec algo_heart python src/analyzer.py"
+                sh "docker exec algo_heart python src/tuner.py"
                 
                 // 4. Cleanup dangling images to save disk space
                 sh "docker image prune -f"
