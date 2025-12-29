@@ -12,13 +12,13 @@ pipeline {
     stages {
         stage('Initialize') {
             steps {
-                echo "🚀 Preparing Workspace..."
+                echo "🚀 Preparing Fixed Workspace..."
                 checkout scm
                 
-                // Ensure permissions are always correct at start
+                // Keep permissions clean every build
                 sh "sudo chown -R jenkins:jenkins ${DEPLOY_PATH}"
                 
-                echo "🧹 Cleaning Docker artifacts..."
+                echo "🧹 Pruning Docker..."
                 sh "docker builder prune -f"
                 sh "docker image prune -f"
             }
@@ -32,22 +32,21 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                echo "📦 Building and Refreshing Containers..."
+                echo "📦 Compiling and Launching..."
                 sh "docker build --network=host -t ${DOCKER_IMAGE} ."
                 sh "docker compose up -d --remove-orphans"
                 sh "docker compose restart dashboard trading-bot"
+                
+                echo "🎯 Running Auto-Tuner..."
+                sh "docker exec algo_heart python src/tuner.py"
             }
         }
     }
     post {
         always {
-            // Scripting inside post always needs to be wrapped in script block or be simple
-            script {
-                try {
-                    sh "docker image prune -f"
-                } catch (Exception e) {
-                    echo "Cleanup skipped: ${e.message}"
-                }
+            // Ensure cleanup runs inside a node context
+            node('built-in') {
+                sh "docker image prune -f"
             }
         }
     }
