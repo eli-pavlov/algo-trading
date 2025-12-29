@@ -92,17 +92,56 @@ services:
 // Dockerfile
 FROM python:3.9-slim
 WORKDIR /app
+
+# Install system dependencies for numerical libraries
 RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
-# Set PYTHONPATH so 'import src.database' works from anywhere
+
+# Set PYTHONPATH so internal imports like 'from src.database' work
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
+
 CMD ["python", "src/main.py"]
 
 // Jenkinsfile
-update       }
+pipeline {
+    agent any
+    environment {
+        DOCKER_IMAGE = "algo-trader"
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Lint Check') {
+            steps {
+                // Ensure flake8 is available and check code quality
+                sh 'pip install flake8'
+                sh 'flake8 src/ --count --max-line-length=120'
+            }
+        }
+        stage('Prepare Secrets') {
+            steps {
+                // Injects the secret .env file from Jenkins credentials
+                withCredentials([file(credentialsId: 'algo-trading-env', variable: 'SECRET_ENV')]) {
+                    sh 'cp $SECRET_ENV .env'
+                }
+            }
+        }
+        stage('Build & Deploy') {
+            steps {
+                // Multi-service deployment using Docker Compose
+                sh "docker compose build"
+                sh "docker compose up -d"
+                sh "docker image prune -f"
+            }
+        }
     }
 }
 
@@ -431,19 +470,23 @@ import json
 
 DB_PATH = os.getenv("DB_PATH", "data/trading.db")
 
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS strategies (symbol TEXT PRIMARY KEY, params TEXT, is_active INTEGER)")
         conn.execute("CREATE TABLE IF NOT EXISTS equity_history (timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, balance REAL)")
 
+
 def save_strategy(symbol, params, is_holding):
     if is_holding:
-        print(f"⚠️ {symbol} is currently active. Skipping rotation."); return
+        print(f"⚠️ {symbol} is currently active. Skipping rotation.")
+        return
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("INSERT INTO strategies (symbol, params, is_active) VALUES (?,?,1) "
-                     "ON CONFLICT(symbol) DO UPDATE SET params=excluded.params", 
+                     "ON CONFLICT(symbol) DO UPDATE SET params=excluded.params",
                      (symbol, json.dumps(params)))
+
 
 def get_strategies():
     with sqlite3.connect(DB_PATH) as conn:

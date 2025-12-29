@@ -1,8 +1,9 @@
-import schedule, time, os
+import schedule
+import time
 from src.database import init_db, get_strategies
 from src.broker import Broker
-import pandas_ta as ta
 import yfinance as yf
+
 
 def heart_beat():
     # Healthcheck for Docker monitoring
@@ -17,14 +18,17 @@ def heart_beat():
     for sym, p in strategies.items():
         if not broker.is_holding(sym):
             df = yf.download(sym, period="5d", interval="1h", progress=False)
-            if df.empty: continue
-            
+            if df.empty:
+                continue
+
+            # ta is available via the pandas_ta extension
             adx = df.ta.adx().iloc[-1]['ADX_14']
             rsi = df.ta.rsi().iloc[-1]
-            
+
             # The "Traffic Light" Logic
             if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
                 broker.buy_bracket(sym, 1, p['target'], p['stop'])
+
 
 if __name__ == "__main__":
     init_db()
