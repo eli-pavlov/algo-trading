@@ -52,6 +52,14 @@ def save_strategy(symbol, params, is_active):
             (symbol, json.dumps(params), 1 if is_active else 0)
         )
 
+# --- NEW FUNCTION ---
+def delete_strategy(symbol):
+    """Removes a strategy from the database. Stops future buys."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM strategies WHERE symbol = ?", (symbol,))
+# --------------------
+
 def get_strategies():
     init_db()
     with sqlite3.connect(DB_PATH) as conn:

@@ -3,7 +3,7 @@ import pandas as pd
 import sqlite3
 import time
 from src.broker import Broker
-from src.database import get_status, update_status, DB_PATH
+from src.database import get_status, update_status, delete_strategy, DB_PATH
 
 # 1. Page Config
 st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
@@ -103,15 +103,41 @@ with tab_assets:
     except Exception as e:
         st.error(f"Error fetching assets: {e}")
 
-# --- TAB 2: STRATEGIES ---
+# --- TAB 2: STRATEGIES (UPDATED) ---
 with tab_strat:
     st.subheader("Active Bot Strategies")
+    st.caption("Deleting a strategy stops NEW buys. Existing positions will exit via their bracket orders (TP/SL).")
+    
     with sqlite3.connect(DB_PATH) as conn:
         try:
+            # Fetch raw data
             df = pd.read_sql("SELECT * FROM strategies", conn)
-            st.dataframe(df, use_container_width=True)
-        except:
-            st.warning("Strategy database is empty.")
+            
+            if not df.empty:
+                # Iterate rows to create custom UI
+                for index, row in df.iterrows():
+                    with st.container():
+                        c1, c2, c3 = st.columns([1, 4, 1])
+                        
+                        # Symbol
+                        c1.markdown(f"### {row['symbol']}")
+                        
+                        # Params (formatted code block)
+                        c2.code(row['params'], language='json')
+                        
+                        # Delete Button
+                        # We use a unique key for each button to avoid Streamlit errors
+                        if c3.button("🗑️ Remove", key=f"del_{row['symbol']}", type="primary"):
+                            delete_strategy(row['symbol'])
+                            st.warning(f"Removed {row['symbol']}! It will no longer be traded.")
+                            time.sleep(1)
+                            st.rerun()
+                        
+                        st.divider()
+            else:
+                st.warning("Strategy database is empty. Run the Analyzer/Scanner to add stocks.")
+        except Exception as e:
+            st.error(f"Error loading strategies: {e}")
 
 # --- TAB 3: MANUAL CONTROL ---
 with tab_manual:
