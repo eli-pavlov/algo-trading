@@ -1,5 +1,5 @@
 import schedule, time
-from database import init_db, get_strategies
+from src.database import init_db, get_strategies
 from broker import Broker
 import pandas_ta as ta
 import yfinance as yf

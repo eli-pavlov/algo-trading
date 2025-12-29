@@ -1,7 +1,7 @@
 import yfinance as yf
 import pandas_ta as ta
 import optuna
-from database import save_strategy
+from src.database import save_strategy
 from broker import Broker
 
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
