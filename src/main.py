@@ -55,14 +55,14 @@ def heart_beat():
 
     if market_open:
         strategies = get_strategies()
+        # Calculate how many potential symbols we are tracking
         num_symbols = len(strategies) if len(strategies) > 0 else 1
         
-        # Get portfolio value for dynamic sizing
         account = broker.api.get_account()
         total_equity = float(account.portfolio_value)
         cash_available = float(account.cash)
         
-        # Target USD amount per stock (e.g., if 5 stocks, spend 20% of portfolio each)
+        # Equal-Weight Logic: Split total equity by number of tracked stocks
         target_usd_per_stock = total_equity / num_symbols
 
         for sym, p in strategies.items():
@@ -72,29 +72,29 @@ def heart_beat():
 
             adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
             rsi_gen = RSIIndicator(close=df['Close'], window=14)
-            curr_adx = adx_gen.adx().iloc[-1]
             curr_rsi = rsi_gen.rsi().iloc[-1]
+            curr_adx = adx_gen.adx().iloc[-1]
 
             is_holding = broker.is_holding(sym)
 
-            # BUY LOGIC
+            # 🟢 BUY LOGIC
             if not is_holding:
                 if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
                     current_price = float(broker.api.get_latest_trade(sym).price)
                     
-                    # Logic: Use target USD, but don't exceed remaining cash
+                    # Spend the target amount, limited by actual cash on hand
                     allowed_spend = min(target_usd_per_stock, cash_available)
                     qty_to_buy = int(allowed_spend / current_price)
 
                     if qty_to_buy > 0:
                         broker.buy_bracket(sym, qty_to_buy, p['target'], p['stop'])
-                        # Update cash estimate for next loop iteration
                         cash_available -= (qty_to_buy * current_price)
 
-            # EXIT LOGIC (Sell Whole Amount)
+            # 🔴 EXIT LOGIC (Per Symbol)
             elif is_holding:
-                # Example Exit: RSI drops below 40 or ADX weakens significantly
+                # If RSI falls below 40, we exit the WHOLE position for this symbol
                 if curr_rsi < 40:
+                    print(f"📉 Exit Signal for {sym}: RSI {curr_rsi:.2f} < 40")
                     broker.sell_all(sym)
 
 if __name__ == "__main__":
