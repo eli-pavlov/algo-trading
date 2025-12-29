@@ -1,39 +1,24 @@
 ﻿pipeline {
     agent any
-    
     environment {
-        // Points to the .env file on the Jenkins server for security
-        ENV_FILE = credentials('algo-trading-env') 
+        DOCKER_IMAGE = "algo-trader"
     }
-
     stages {
-        stage('🛠️ Build') {
+        stage('Checkout') {
             steps {
-                echo 'Building Docker Images...'
-                sh 'docker compose build'
+                git branch: 'main', url: 'https://github.com/youruser/algo-trading.git'
             }
         }
-
-        stage('🛡️ Quality Check') {
+        stage('Lint') {
             steps {
-                echo 'Running Linting...'
-                // Runs flake8 inside the newly built container
-                sh 'docker compose run --rm trading-bot flake8 src/'
+                sh 'pip install flake8 && flake8 src/'
             }
         }
-
-        stage('🚀 Deploy') {
+        stage('Build & Deploy') {
             steps {
-                echo 'Restarting Services...'
-                // -d runs it in the background (daemon mode)
-                sh 'docker compose up -d'
-            }
-        }
-
-        stage('🧹 Cleanup') {
-            steps {
-                echo 'Cleaning up dangling images...'
-                sh 'docker image prune -f'
+                // Docker Compose uses the local .env file which Jenkins should manage
+                sh "docker compose build"
+                sh "docker compose up -d"
             }
         }
     }

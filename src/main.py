@@ -5,7 +5,7 @@ import pandas_ta as ta
 import yfinance as yf
 
 def heart_beat():
-    # 1. Healthcheck file for Docker monitoring
+    # Healthcheck for Docker monitoring
     with open("/tmp/heartbeat", "w") as f:
         f.write(str(time.time()))
 
@@ -15,18 +15,20 @@ def heart_beat():
 
     strategies = get_strategies()
     for sym, p in strategies.items():
-        pos = broker.is_holding(sym)
-        
-        if not pos:
-            # Simple Trigger Example
+        if not broker.is_holding(sym):
             df = yf.download(sym, period="5d", interval="1h", progress=False)
+            if df.empty: continue
+            
             adx = df.ta.adx().iloc[-1]['ADX_14']
-            if adx > p.get('adx_trend', 25):
+            rsi = df.ta.rsi().iloc[-1]
+            
+            # The "Traffic Light" Logic
+            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
                 broker.buy_bracket(sym, 1, p['target'], p['stop'])
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trading Heart Started...")
+    print("🚀 Heart Beat Started...")
     schedule.every(1).minutes.do(heart_beat)
     while True:
         schedule.run_pending()

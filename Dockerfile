@@ -1,17 +1,23 @@
-FROM python:3.9-slim
+version: '3.8'
+services:
+  trading-bot:
+    build: .
+    container_name: algo_heart
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
+      interval: 1m
+      retries: 3
 
-WORKDIR /app
-
-# Install system dependencies for numerical libraries
-RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-# Set Python Path to find internal modules
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-
-CMD ["python", "src/main.py"]
+  dashboard:
+    build: .
+    container_name: algo_ui
+    ports:
+      - "8501:8501"
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0

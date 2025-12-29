@@ -10,7 +10,7 @@ def init_db():
 
 def save_strategy(symbol, params, is_holding):
     if is_holding:
-        print(f"⚠️ {symbol} is currently active. Skipping re-optimization."); return
+        print(f"⚠️ {symbol} is currently active. Skipping rotation."); return
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("INSERT INTO strategies (symbol, params, is_active) VALUES (?,?,1) "
                      "ON CONFLICT(symbol) DO UPDATE SET params=excluded.params", 
