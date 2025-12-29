@@ -22,3 +22,5 @@ cache/
 # Strategies and settings
 strategies.yaml
 settings.yaml
+fine_tuner.*
+market_scanner.*
