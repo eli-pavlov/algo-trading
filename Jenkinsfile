@@ -27,13 +27,17 @@ pipeline {
         stage('Build & Deploy') {
             steps {
                 echo "📦 Building and Refreshing..."
-                // Use 'dir' to set the execution context to the workspace
                 dir("${WORKSPACE}") {
                     sh """
                         export DOCKER_IMAGE=${DOCKER_IMAGE}
+                        export WORKSPACE='${WORKSPACE}'
                         docker compose up -d --build --remove-orphans
                     """
+                    // Changed 'dashboard' to 'dashboard' and 'trading-bot'
+                    // These must match the keys in your docker-compose.yaml
                     sh "docker compose restart dashboard trading-bot"
+                    sh "sleep 5"
+                    sh "docker exec algo_heart python src/tuner.py"
                 }
             }
         }
