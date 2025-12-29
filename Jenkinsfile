@@ -18,7 +18,8 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                sh "docker compose build"
+                // Use --no-cache once to clear out the broken pandas_ta attempts
+                sh "docker compose build --no-cache"
                 sh "docker compose up -d"
                 sh "docker image prune -f"
             }
