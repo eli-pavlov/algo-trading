@@ -3,6 +3,7 @@ krakenex
 pykrakenapi
 yfinance
 pandas
+pandas-ta-classic
 ta
 numpy
 python-dotenv
