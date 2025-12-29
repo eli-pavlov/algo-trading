@@ -10,6 +10,8 @@ from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
 from src.broker import Broker
+# --- NEW IMPORT: Trigger the report ---
+from src.notifications import send_trade_notification
 
 # Set Market Timezone to New York
 MARKET_TZ = "America/New_York"
@@ -22,6 +24,11 @@ def process_manual_queue(broker):
             try:
                 broker.submit_manual_order(sym, qty, side, o_type)
                 update_manual_order_status(o_id, 'COMPLETED')
+                
+                # --- TRIGGER: Manual Trade Executed ---
+                print(f"✅ Manual Order {sym} Completed. Sending Report...")
+                send_trade_notification()
+                
             except Exception:
                 update_manual_order_status(o_id, 'FAILED')
     except Exception as e:
@@ -56,6 +63,7 @@ def heart_beat():
         update_status("api_health", "🔴 API DISCONNECTED")
         return
 
+    # Check for manual orders regardless of market status (queued)
     process_manual_queue(broker)
 
     if get_status("engine_running") == "0": return
@@ -110,11 +118,19 @@ def heart_beat():
                             print(f"🚀 BUY SIGNAL: {sym}")
                             broker.buy_bracket(sym, qty, p['target'], p['stop'])
                             cash_available -= (qty * current_price)
+                            
+                            # --- TRIGGER: Auto Buy Executed ---
+                            send_trade_notification()
+                            
                     except: pass
 
             elif is_holding:
                 if curr_rsi < 40:
                     broker.sell_all(sym)
+                    
+                    # --- TRIGGER: Auto Sell Executed ---
+                    print(f"📉 SELL SIGNAL: {sym}")
+                    send_trade_notification()
 
 if __name__ == "__main__":
     init_db()
