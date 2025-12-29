@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import time
+import json
 from src.broker import Broker
 from src.database import get_status, update_status, delete_strategy, DB_PATH
 
@@ -103,10 +104,10 @@ with tab_assets:
     except Exception as e:
         st.error(f"Error fetching assets: {e}")
 
-# --- TAB 2: STRATEGIES (UPDATED) ---
+# --- TAB 2: STRATEGIES (VISUAL UPDATE) ---
 with tab_strat:
     st.subheader("Active Bot Strategies")
-    st.caption("Deleting a strategy stops NEW buys. Existing positions will exit via their bracket orders (TP/SL).")
+    st.caption("Strategies define entry rules. Exits are handled by Bracket Orders (TP/SL).")
     
     with sqlite3.connect(DB_PATH) as conn:
         try:
@@ -117,19 +118,38 @@ with tab_strat:
                 # Iterate rows to create custom UI
                 for index, row in df.iterrows():
                     with st.container():
-                        c1, c2, c3 = st.columns([1, 4, 1])
+                        # Layout: Symbol Name (Small) | Params (Wide) | Delete (Small)
+                        c1, c2, c3 = st.columns([1, 5, 1])
                         
-                        # Symbol
-                        c1.markdown(f"### {row['symbol']}")
+                        # Column 1: Symbol
+                        c1.markdown(f"## {row['symbol']}")
                         
-                        # Params (formatted code block)
-                        c2.code(row['params'], language='json')
+                        # Column 2: Formatted Metrics
+                        try:
+                            # Parse JSON params
+                            p = json.loads(row['params'])
+                            
+                            # Create 4 mini-columns for the stats
+                            p1, p2, p3, p4 = c2.columns(4)
+                            
+                            p1.metric("RSI Limit", p.get('rsi_trend', 'N/A'))
+                            p2.metric("ADX Min", p.get('adx_trend', 'N/A'))
+                            
+                            # Convert decimals to percentages
+                            tp_pct = p.get('target', 0) * 100
+                            sl_pct = p.get('stop', 0) * 100
+                            
+                            # Color code: TP Green, SL Red (using standard delta logic)
+                            p3.metric("Take Profit", f"{tp_pct:.1f}%")
+                            p4.metric("Stop Loss", f"{sl_pct:.1f}%")
+                            
+                        except Exception:
+                            c2.warning("Invalid Parameters Format")
                         
-                        # Delete Button
-                        # We use a unique key for each button to avoid Streamlit errors
+                        # Column 3: Delete Button
                         if c3.button("🗑️ Remove", key=f"del_{row['symbol']}", type="primary"):
                             delete_strategy(row['symbol'])
-                            st.warning(f"Removed {row['symbol']}! It will no longer be traded.")
+                            st.toast(f"Removed {row['symbol']} from strategies.")
                             time.sleep(1)
                             st.rerun()
                         
