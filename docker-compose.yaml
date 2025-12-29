@@ -1,20 +1,20 @@
 services:
   trading-bot:
-    image: ${DOCKER_IMAGE}
+    image: ${DOCKER_IMAGE:-algo-trader}
     container_name: algo_heart
     volumes:
-      - ${WORKSPACE}/data:/app/data
-      - ${WORKSPACE}/src:/app/src
-      - ${WORKSPACE}/config:/app/config
+      - "${WORKSPACE}/data:/app/data"
+      - "${WORKSPACE}/src:/app/src"
+      - "${WORKSPACE}/config:/app/config"
     network_mode: "host"
     env_file: .env
 
   dashboard:
-    image: ${DOCKER_IMAGE}
+    image: ${DOCKER_IMAGE:-algo-trader}
     container_name: algo_ui
     volumes:
-      - ${WORKSPACE}/data:/app/data
-      - ${WORKSPACE}/src:/app/src
+      - "${WORKSPACE}/data:/app/data"
+      - "${WORKSPACE}/src:/app/src"
     network_mode: "host"
     env_file: .env
     command: streamlit run src/dashboard.py --server.port=8501
