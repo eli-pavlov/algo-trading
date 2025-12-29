@@ -6,16 +6,15 @@ services:
     restart: always
     env_file: .env
     network_mode: "host"
+    # PRESERVED: Data persistence
     volumes:
       - ./data:/app/data
-    # --- NEW SECTION: Unlock Memory ---
     deploy:
       resources:
         limits:
-          memory: 3G  # Allow up to 4GB
+          memory: 3G
         reservations:
-          memory: 1G  # Guarantee at least 1GB
-    # ----------------------------------
+          memory: 512M  # Lowered reservation so container starts easier on limited hosts
     healthcheck:
       test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
       interval: 1m
