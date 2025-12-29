@@ -60,33 +60,37 @@ def objective(trial, df):
     return score
 
 
-def optimize_stock(symbol, broker):
-    print(f"🕵️ Analyzing {symbol}...")
-    
-    # 1. INITIALIZE DF HERE (Top Level Scope) - Prevents F821
-    df = pd.DataFrame()
-    
-    # 2. Download Data
+def get_stock_data(symbol):
+    """Helper to fetch and clean data, isolated for linter safety."""
     try:
         df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False)
+        if df.empty:
+            return None
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        return df
     except Exception as e:
         print(f"❌ Download failed for {symbol}: {e}")
-        return
+        return None
 
-    if df.empty:
+
+def optimize_stock(symbol, broker):
+    print(f"🕵️ Analyzing {symbol}...")
+
+    # 1. Get Data (Scope is clear here)
+    df = get_stock_data(symbol)
+
+    if df is None or df.empty:
         print(f"❌ No data for {symbol}")
         return
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    # 3. Optimize
+    # 2. Optimize
     try:
-        # We assign df to a local variable to be explicit for the lambda
-        data_for_optimization = df
-        
         study = optuna.create_study(direction="maximize")
-        study.optimize(lambda trial: objective(trial, data_for_optimization), n_trials=5)
+        # Now df is definitely defined in this scope
+        study.optimize(lambda trial: objective(trial, df), n_trials=5)
 
         print(f"✅ Best for {symbol}: {study.best_params}")
 
@@ -95,7 +99,6 @@ def optimize_stock(symbol, broker):
 
         # Cleanup
         del df
-        del data_for_optimization
         del study
         gc.collect()
 
