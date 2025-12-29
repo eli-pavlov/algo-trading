@@ -63,7 +63,10 @@ def objective(trial, df):
 def optimize_stock(symbol, broker):
     print(f"🕵️ Analyzing {symbol}...")
     
-    # 1. Download Data - OUTSIDE the main try block so 'df' is defined in scope
+    # 1. INITIALIZE DF HERE (Top Level Scope) - Prevents F821
+    df = pd.DataFrame()
+    
+    # 2. Download Data
     try:
         df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False)
     except Exception as e:
@@ -77,18 +80,22 @@ def optimize_stock(symbol, broker):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # 2. Optimize - Inside its own try block, but 'df' is now safe to use
+    # 3. Optimize
     try:
+        # We assign df to a local variable to be explicit for the lambda
+        data_for_optimization = df
+        
         study = optuna.create_study(direction="maximize")
-        study.optimize(lambda trial: objective(trial, df), n_trials=5)
+        study.optimize(lambda trial: objective(trial, data_for_optimization), n_trials=5)
 
         print(f"✅ Best for {symbol}: {study.best_params}")
 
         is_holding = broker.is_holding(symbol)
         save_strategy(symbol, study.best_params, is_holding is not None)
 
-        # Aggressive Cleanup
+        # Cleanup
         del df
+        del data_for_optimization
         del study
         gc.collect()
 
