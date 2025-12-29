@@ -1,15 +1,21 @@
 services:
   trading-bot:
     image: algo-trader
+    container_name: algo_heart
     volumes:
       - ./data:/app/data
-      - ./src:/app/src           # <--- Maps your logic folder
-      - ./config:/app/config     # <--- Maps your strategy settings
-    # ... rest of config ...
+      - ./src:/app/src           # <--- This maps your live logic
+      - ./config:/app/config     # <--- Maps strategy settings
+    network_mode: "host"
+    env_file: .env
+    # ... rest of your config ...
 
   dashboard:
     image: algo-trader
+    container_name: algo_ui
     volumes:
       - ./data:/app/data
-      - ./src:/app/src           # <--- Maps your logic folder
-    # ... rest of config ...
+      - ./src:/app/src           # <--- UI updates automatically via Streamlit
+    network_mode: "host"
+    env_file: .env
+    command: streamlit run src/dashboard.py --server.port=8501

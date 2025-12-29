@@ -15,31 +15,34 @@ pipeline {
             }
         }
         
-        // --- STAGE A: Build Image (Only if dependencies changed) ---
+        // STAGE: Build Image
+        // Only runs if core files change or if the image is missing
         stage('Build Image') {
             when {
                 anyOf {
                     changeset "requirements.txt"
                     changeset "Dockerfile"
                     changeset "Jenkinsfile"
-                    // If the image doesn't exist at all, we must build it
+                    // Force build if image doesn't exist locally
                     expression { sh(script: "docker images -q ${DOCKER_IMAGE} == ''", returnStatus: true) == 0 }
                 }
             }
             steps {
+                echo "📦 Core files changed. Rebuilding Docker Image..."
                 sh "docker build --network=host -t ${DOCKER_IMAGE} ."
             }
         }
 
-        // --- STAGE B: Deploy & Update Logic ---
+        // STAGE: Deploy & Refresh Logic
         stage('Deploy & Refresh') {
             steps {
-                // Because of the 'volumes' in docker-compose.yaml, 
-                // simply running 'up -d' will pick up new .py files immediately.
+                echo "🚀 Syncing logic and restarting containers..."
+                
+                // 'up -d' ensures the network and base containers are correct
                 sh "docker compose up -d --remove-orphans"
                 
-                // If the container was already running, it needs a restart 
-                // to refresh the Python process memory with the new logic.
+                // CRITICAL: Restarting the bot service forces Python to reload 
+                // the new logic mapped from the host disk.
                 sh "docker compose restart trading-bot"
                 
                 sh "sleep 5"
