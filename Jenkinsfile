@@ -6,15 +6,16 @@ pipeline {
     stages {
         stage('Sanitize Disk') {
             steps {
-                echo "🧹 Pruning Docker caches..."
-                // Buildx cache is often the biggest hidden space eater
+                echo "🧹 Cleaning Docker only (Safe Cleanup)..."
                 sh "docker builder prune -f"
-                // Clean logs safely with NOPASSWD
-                sh "sudo journalctl --vacuum-time=1d || echo 'Sudo failed, skipping log cleanup'"
+                sh "docker image prune -f"
+                // REMOVED: sudo rm -rf /var/lib/jenkins/workspace/* // That line was the "Workspace Eraser" causing your error.
             }
         }
         stage('Checkout') {
-            steps { checkout scm }
+            steps { 
+                cleanWs()
+                checkout scm }
         }
         stage('Prepare Secrets') {
             steps {

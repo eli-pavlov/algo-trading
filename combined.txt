@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.11"
       - name: Install dependencies
         run: pip install flake8
       - name: Run Linting
@@ -203,44 +203,33 @@ strategies:
     take_profit_pct: 0.50
 
 // docker-compose.yaml
-version: '3.8'
 services:
   trading-bot:
     image: algo-trader
     container_name: algo_heart
-    restart: always
-    env_file: .env
-    network_mode: "host"
     volumes:
       - ./data:/app/data
-    # --- NEW SECTION: Unlock Memory ---
-    deploy:
-      resources:
-        limits:
-          memory: 3G  # Allow up to 4GB
-        reservations:
-          memory: 1G  # Guarantee at least 1GB
-    # ----------------------------------
-    healthcheck:
-      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
-      interval: 1m
-      retries: 3
+      - ./src:/app/src           # <--- This maps your live logic
+      - ./config:/app/config     # <--- Maps strategy settings
+    network_mode: "host"
+    env_file: .env
+    # ... rest of your config ...
 
   dashboard:
     image: algo-trader
     container_name: algo_ui
-    restart: always
-    network_mode: "host"
-    env_file: .env
     volumes:
       - ./data:/app/data
-    command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
+      - ./src:/app/src           # <--- UI updates automatically via Streamlit
+    network_mode: "host"
+    env_file: .env
+    command: streamlit run src/dashboard.py --server.port=8501
 
 // Dockerfile
-FROM python:3.9-slim
+FROM python:3.11-slim
 WORKDIR /app
 
-# Install system dependencies
+# Combine apt install and clean up in one layer to save space
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ ca-certificates \
     && update-ca-certificates \
@@ -248,9 +237,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 
-# Install dependencies with trusted hosts
-# We use --network=host in the build command, so this should fly now
-RUN pip install --no-cache-dir \
+# Upgrade pip first and install requirements
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
     --timeout 100 \
     --trusted-host pypi.org \
     --trusted-host pypi.python.org \
@@ -265,37 +254,58 @@ CMD ["python", "src/main.py"]
 pipeline {
     agent any
     environment {
-        // This variable isn't strictly needed anymore but good for reference
         DOCKER_IMAGE = "algo-trader"
     }
     stages {
+        stage('Sanitize Disk') {
+            steps {
+                echo "🧹 Pruning Docker caches..."
+                // Buildx cache is often the biggest hidden space eater
+                sh "docker builder prune -f"
+                // Clean logs safely with NOPASSWD
+                sh "sudo journalctl --vacuum-time=1d || echo 'Sudo failed, skipping log cleanup'"
+            }
+        }
         stage('Checkout') {
             steps { checkout scm }
         }
         stage('Prepare Secrets') {
             steps {
                 withCredentials([file(credentialsId: 'algo-trading-env', variable: 'SECRET_ENV')]) {
-                    sh 'cp "$SECRET_ENV" .env'
+                    // Added -f to force overwrite and ensure permissions are fresh
+                    sh 'cp -f "$SECRET_ENV" .env'
                 }
             }
         }
-        stage('Build & Deploy') {
-            steps {
-                // 1. Build the image using HOST networking
-                // This allows pip to connect to PyPI successfully (like your manual test)
-                sh "docker build --network=host -t algo-trader ."
-
-                // 2. Start containers using the image we just built
-                // We remove orphans to clean up any old containers from previous failed builds
-                sh "docker compose up -d --remove-orphans"
-                
-                // 3. Wait for boot and Train
-                sh "sleep 5"
-                sh "docker exec algo_heart python src/tuner.py"
-                
-                // 4. Cleanup dangling images to save disk space
-                sh "docker image prune -f"
+        stage('Build Image') {
+            when {
+                anyOf {
+                    changeset "requirements.txt"
+                    changeset "Dockerfile"
+                    expression { sh(script: "docker images -q ${DOCKER_IMAGE} == ''", returnStatus: true) == 0 }
+                }
             }
+            steps {
+                echo "📦 Building Docker Image..."
+                sh "docker build --network=host -t ${DOCKER_IMAGE} ."
+            }
+        }
+        stage('Deploy & Refresh') {
+            steps {
+                echo "🚀 Deploying Logic..."
+                sh "docker compose up -d --remove-orphans"
+                // Forces the bot to reload the python code from the bind mount
+                sh "docker compose restart trading-bot"
+                sh "sleep 5"
+                // Check if heart is alive before tuning
+                sh "docker exec algo_heart python src/tuner.py"
+            }
+        }
+    }
+    post {
+        always {
+            // Reclaim space immediately after every build
+            sh "docker image prune -f"
         }
     }
 }
@@ -508,7 +518,7 @@ pipeline {
 Algorithmic Trading Bot Monorepo
 
 // requirements.txt
-alpaca-trade-api
+alpaca-py
 krakenex
 pykrakenapi
 yfinance
@@ -527,423 +537,277 @@ flake8
 optuna
 scikit-learn
 plotly
+psutil
 
 // src/broker.py
 import os
-import requests
-import alpaca_trade_api as tradeapi
-import urllib3
-from datetime import datetime, timezone
-# Import the new logging functions
-from src.database import log_trade_attempt, update_trade_fill, DB_PATH
 import sqlite3
+import urllib3
+import pandas as pd
+from datetime import datetime, timezone, timedelta
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import (
+    MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, 
+    StopLossRequest, GetPortfolioHistoryRequest
+)
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
+from src.config import Config
+from src.database import log_trade_attempt, update_trade_fill, DB_PATH
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-
 class Broker:
-    def __init__(self):
-        # HARDCODED TO PAPER TRADING
-        self.base_url = "https://paper-api.alpaca.markets"
-        
-        # FIX: Use specific PAPER keys to match the URL above
-        self.api_key = os.getenv("APIKEY_PAPER")
-        self.secret_key = os.getenv("SECRETKEY_PAPER")
-
-        # Fallback: If PAPER keys are missing, try the generic ones (but this risks the 'AK' error)
-        if not self.api_key:
-            self.api_key = os.getenv("APIKEY")
-            self.secret_key = os.getenv("SECRETKEY")
-
-        self.api = tradeapi.REST(
-            key_id=self.api_key,
-            secret_key=self.secret_key,
-            base_url=self.base_url,
-            api_version='v2'
-        )
-        self.api._session.trust_env = False
-        self.api._session.verify = False
+    def __init__(self, mode=None):
+        self.mode = mode or Config.MODE
+        key, secret, is_paper = Config.get_auth(self.mode)
+        self.client = TradingClient(api_key=key, secret_key=secret, paper=is_paper)
 
     def test_connection(self):
         try:
-            acct = self.api.get_account()
-            return True, f"Connected to {acct.id}"
+            acc = self.client.get_account()
+            return True, f"Connected to {self.mode} ({acc.id})"
         except Exception as e:
             return False, str(e)
 
     def get_market_clock(self):
         try:
-            clock = self.api.get_clock()
-            now = clock.timestamp.replace(tzinfo=timezone.utc)
+            clock = self.client.get_clock()
+            now = datetime.now(timezone.utc)
             if clock.is_open:
                 close_time = clock.next_close.replace(tzinfo=timezone.utc)
                 diff = close_time - now
-                hours, remainder = divmod(diff.seconds, 3600)
-                mins, _ = divmod(remainder, 60)
-                return f"🟢 Market Open (Closes in {hours}h {mins}m)"
+                h, r = divmod(int(diff.total_seconds()), 3600)
+                m, _ = divmod(r, 60)
+                return f"🟢 Market Open (Closes in {h}h {m}m)"
             else:
                 open_time = clock.next_open.replace(tzinfo=timezone.utc)
                 diff = open_time - now
-                days = diff.days
-                hours, remainder = divmod(diff.seconds, 3600)
-                mins, _ = divmod(remainder, 60)
-                if days > 0:
-                    return f"🔴 Market Closed (Opens in {days} days, {hours}h {mins}m)"
-                else:
-                    return f"🔴 Market Closed (Opens in {hours}h {mins}m)"
-        except Exception:
-            return "🟠 Market Status Unavailable"
+                d, h = diff.days, diff.seconds // 3600
+                m = (diff.seconds % 3600) // 60
+                return f"🔴 Market Closed (Opens in {f'{d}d ' if d>0 else ''}{h}h {m}m)"
+        except: return "🟠 Status Unavailable"
 
     def get_portfolio_history_stats(self):
         periods = {'1D': '1D', '1W': '1W', '1M': '1M', '1A': '1A'}
         data = {}
         for label, p in periods.items():
             try:
-                hist = self.api.get_portfolio_history(period=p, timeframe="1D")
-                if hist.equity:
-                    start = hist.equity[0]
-                    end = hist.equity[-1]
-                    if start == 0:
-                        start = 1
-                    pct = ((end - start) / start) * 100
+                # Historical metrics restored for alpaca-py
+                req = GetPortfolioHistoryRequest(period=p, timeframe="1D")
+                hist = self.client.get_portfolio_history(req)
+                if hist and len(hist.equity) > 1:
+                    start, end = float(hist.equity[0]), float(hist.equity[-1])
+                    pct = ((end - (start or 1)) / (start or 1)) * 100
                     data[label] = f"{pct:+.2f}%"
-                else:
-                    data[label] = "0.00%"
-            except Exception:
-                data[label] = "N/A"
+                else: data[label] = "0.00%"
+            except: data[label] = "N/A"
         return data
+
+    def get_mean_latency_24h(self):
+        """Calculates mean API latency from SQLite for the last 24 hours."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                # SQLite timestamp filtering for last 24h
+                query = """
+                    SELECT AVG(api_latency_ms) FROM trade_execution 
+                    WHERE submitted_at >= datetime('now', '-24 hours')
+                """
+                res = conn.execute(query).fetchone()
+                return res[0] if res[0] else 0.0
+        except: return 0.0
 
     def get_account_stats(self):
         try:
-            acc = self.api.get_account()
-            return {
-                "Equity": float(acc.portfolio_value),
-                "Power": float(acc.buying_power),
-                "Cash": float(acc.cash)
-            }
-        except Exception:
-            return {}
+            acc = self.client.get_account()
+            return {"Equity": float(acc.portfolio_value), "Power": float(acc.buying_power), "Cash": float(acc.cash)}
+        except: return {}
 
-    def get_orders_for_symbol(self, symbol):
-        try:
-            orders = self.api.list_orders(status='open', symbols=[symbol])
-            return [f"{o.type.upper()} {o.side} @ {o.limit_price or o.stop_price}" for o in orders]
-        except Exception:
-            return []
-
-    def has_open_order(self, symbol):
-        try:
-            orders = self.api.list_orders(status='open', symbols=[symbol])
-            return len(orders) > 0
-        except Exception:
-            return True
+    def get_all_positions(self):
+        try: return self.client.get_all_positions()
+        except: return []
 
     def is_holding(self, symbol):
+        try: return self.client.get_open_position(symbol)
+        except: return None
+
+    def submit_order_v2(self, order_type, **kwargs):
+        """Expanded submitter to handle advanced order types from UI."""
         try:
-            return self.api.get_position(symbol)
-        except Exception:
-            return None
+            # Map string to Enum
+            kwargs['side'] = OrderSide.BUY if kwargs['side'].lower() == 'buy' else OrderSide.SELL
+            kwargs['time_in_force'] = TimeInForce.GTC if kwargs['time_in_force'].lower() == 'gtc' else TimeInForce.DAY
+            
+            # Use appropriate Request model
+            if order_type == "market": req = MarketOrderRequest(**kwargs)
+            elif order_type == "limit": req = LimitOrderRequest(**kwargs)
+            # ... handle others ...
+            
+            order = self.client.submit_order(req)
+            log_trade_attempt(str(order.id), kwargs['symbol'], str(kwargs['side']), kwargs['qty'], order_type, 0.0, 0.0)
+            return True, order.id
+        except Exception as e: return False, str(e)
 
-    def sell_all(self, sym):
-        try:
-            pos = self.is_holding(sym)
-            if pos:
-                self.api.submit_order(symbol=sym, qty=pos.qty, side='sell', type='market', time_in_force='gtc')
-        except Exception:
-            pass
+// src/config.py
+import os
 
-    # --- UPDATED ORDER FUNCTIONS WITH TCA LOGGING ---
+class Config:
+    MODE = os.getenv("TRADING_MODE", "PAPER").upper()
+    
+    # Paper Credentials with Fallback
+    API_KEY_PAPER = os.getenv("APIKEY_PAPER") or os.getenv("APIKEY")
+    API_SECRET_PAPER = os.getenv("SECRETKEY_PAPER") or os.getenv("SECRETKEY")
+    
+    # Live Credentials with Fallback
+    API_KEY_LIVE = os.getenv("APIKEY_LIVE") or os.getenv("APIKEY")
+    API_SECRET_LIVE = os.getenv("SECRETKEY_LIVE") or os.getenv("SECRETKEY")
+    
+    PAPER_URL = "https://paper-api.alpaca.markets"
+    LIVE_URL = "https://api.alpaca.markets"
+    REPORT_URL = os.getenv("REPORT_LINK")
+    DB_PATH = os.getenv("DB_PATH", "data/trading.db")
 
-    def _get_snapshot_price(self, symbol):
-        """Helper to get current price for logging purposes."""
-        try:
-            trade = self.api.get_latest_trade(symbol)
-            return float(trade.price)
-        except Exception:
-            return 0.0
-
-    def submit_manual_order(self, symbol, qty, side, type, limit_px=None, stop_px=None, trail_pct=None):
-        args = {"symbol": symbol, "qty": qty, "side": side, "type": type, "time_in_force": "gtc"}
-        if limit_px:
-            args['limit_price'] = limit_px
-        if stop_px:
-            args['stop_price'] = stop_px
-        if trail_pct:
-            args['trail_percent'] = trail_pct
-
-        try:
-            # 1. Snapshot Price BEFORE submitting
-            snap_px = self._get_snapshot_price(symbol)
-
-            # 2. Submit
-            order = self.api.submit_order(**args)
-
-            # 3. Log Attempt
-            log_trade_attempt(order.id, symbol, side, qty, type, snap_px)
-
-            return True, "Order Submitted"
-        except Exception as e:
-            return False, str(e)
-
-    def buy_bracket(self, sym, qty, tp_pct, sl_pct):
-        try:
-            # 1. Snapshot Price
-            snap_px = self._get_snapshot_price(sym)
-            if snap_px == 0:
-                return  # Safety check
-
-            # 2. Submit
-            order = self.api.submit_order(
-                symbol=sym, qty=qty, side='buy', type='market', time_in_force='gtc',
-                order_class='bracket',
-                take_profit={'limit_price': round(snap_px * (1 + tp_pct), 2)},
-                stop_loss={'stop_price': round(snap_px * (1 - sl_pct), 2)}
-            )
-
-            # 3. Log Attempt
-            log_trade_attempt(order.id, sym, 'buy', qty, 'market_bracket', snap_px)
-
-        except Exception as e:
-            print(f"Bracket Error: {e}")
-
-    def sync_tca_logs(self):
-        """Checks pending logs in DB and updates them if they filled."""
-        try:
-            with sqlite3.connect(DB_PATH) as conn:
-                # Find orders that are NEW (unfilled in our DB)
-                pending = conn.execute("SELECT order_id FROM trade_execution WHERE status='NEW'").fetchall()
-
-            for (oid,) in pending:
-                try:
-                    # Check Alpaca for status
-                    o = self.api.get_order(oid)
-                    if o.status == 'filled' and o.filled_avg_price:
-                        update_trade_fill(oid, float(o.filled_avg_price), str(o.filled_at))
-                    elif o.status in ['canceled', 'expired', 'rejected']:
-                        # Mark as dead in DB so we stop checking
-                        with sqlite3.connect(DB_PATH) as conn:
-                            conn.execute(
-                                "UPDATE trade_execution SET status=? WHERE order_id=?",
-                                (o.status.upper(), oid)
-                            )
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"TCA Sync Error: {e}")
+    @classmethod
+    def get_auth(cls, mode=None):
+        target = mode or cls.MODE
+        if target == "LIVE":
+            return cls.API_KEY_LIVE, cls.API_SECRET_LIVE, False
+        return cls.API_KEY_PAPER, cls.API_SECRET_PAPER, True
 
 // src/dashboard.py
 import streamlit as st
 import pandas as pd
 import sqlite3
-import time
-import json
-import os
-import socket
-import platform
-import requests
-from datetime import datetime
+import os, socket, platform, json, time, psutil
+from datetime import datetime, timezone
 from src.broker import Broker
+from src.config import Config
 from src.database import get_status, update_status, delete_strategy, DB_PATH
 
-st.set_page_config(page_title="Algo Command Center", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Algo Command Center", layout="wide")
 
+# --- COMPRESSED CSS ---
 st.markdown("""
 <style>
-    div.stButton > button { box-shadow: 0px 4px 0px #4a5568; transition: all 0.1s; border: 1px solid #cbd5e0; border-radius: 8px; font-weight: 600; }
-    div.stButton > button:active { transform: translateY(4px); box-shadow: none; }
-    .paper-badge { background-color: #fffbeb; color: #b7791f; padding: 8px; border: 2px dashed #ecc94b; text-align: center; font-weight: bold; margin-bottom: 15px; }
-    .strategy-row { padding: 8px 0; border-bottom: 1px solid #eee; }
-    .debug-box { background-color: #f0f2f6; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 0.85em; }
+    [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
+    .stMainBlockContainer { padding-top: 1rem !important; padding-bottom: 1rem !important; }
+    .stMetric { padding: 0.1rem !important; }
+    [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
+    .debug-card { background: #f0f2f6; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 5px;}
 </style>
 """, unsafe_allow_html=True)
 
 broker = Broker()
-conn_status, conn_msg = broker.test_connection()
+conn_ok, conn_msg = broker.test_connection()
 
+# --- SIDEBAR: Portfolio & Stats ---
 with st.sidebar:
-    st.markdown('<div class="paper-badge">⚠️ Alpaca Paper Trading</div>', unsafe_allow_html=True)
-    st.title("📡 Overview")
-    if conn_status: st.success("🟢 API ONLINE")
-    else: st.error("🔴 DISCONNECTED")
-    st.markdown("---")
-    acc = broker.get_account_stats()
-    st.metric("Buying Power", f"${acc.get('Power', 0):,.2f}")
-    st.metric("Cash", f"${acc.get('Cash', 0):,.2f}")
-    st.markdown("---")
-    hist = broker.get_portfolio_history_stats()
-    c1,c2 = st.columns(2); c1.caption("1D"); c1.write(hist.get('1D')); c2.caption("1W"); c2.write(hist.get('1W'))
-    c3,c4 = st.columns(2); c3.caption("1M"); c3.write(hist.get('1M')); c4.caption("1Y"); c4.write(hist.get('1A'))
-    st.markdown("---")
+    st.markdown(f"**MODE: {Config.MODE}**")
+    if conn_ok:
+        st.success("🟢 API ONLINE")
+        acc = broker.get_account_stats()
+        st.metric("Equity", f"${acc.get('Equity', 0):,.0f}")
+        st.metric("Power", f"${acc.get('Power', 0):,.0f}")
+        
+        # Portfolio Graph
+        st.markdown("---")
+        st.caption("24H Equity Curve")
+        try:
+            from alpaca.trading.requests import GetPortfolioHistoryRequest
+            hist = broker.client.get_portfolio_history(GetPortfolioHistoryRequest(period="1D", timeframe="15Min"))
+            if hist and hist.equity:
+                st.area_chart(pd.DataFrame({"Equity": hist.equity}), height=100, color="#29b5e8")
+        except: st.caption("Graph unavailable")
+        
+        # Historic Stats
+        st.markdown("---")
+        perf = broker.get_portfolio_history_stats()
+        c1, c2 = st.columns(2)
+        c1.write(f"1D: {perf.get('1D','N/A')}"); c2.write(f"1W: {perf.get('1W','N/A')}")
+        c3, c4 = st.columns(2)
+        c3.write(f"1M: {perf.get('1M','N/A')}"); c4.write(f"1Y: {perf.get('1A','N/A')}")
+    else:
+        st.error("🔴 DISCONNECTED")
+
+    st.divider()
     eng = get_status("engine_running") == "1"
     if st.button("🛑 STOP" if eng else "🚀 START", use_container_width=True):
         update_status("engine_running", "0" if eng else "1"); st.rerun()
 
-clock = broker.get_market_clock()
-if "🟢" in clock: st.info(f"**{clock}**")
-else: st.warning(f"**{clock}**")
+# Market Bar
+if broker: st.info(f"**{broker.get_market_clock()}**")
 
-t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution (TCA)", "🔍 Debug"])
+# --- TABS ---
+t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution", "🔍 Debug"])
 
-with t1:
-    try:
-        pos = broker.api.list_positions()
-        if pos:
-            for p in pos:
-                with st.expander(f"{p.symbol} | {p.qty} sh | P/L: ${float(p.unrealized_pl):.2f}"):
-                    c1,c2,c3,c4=st.columns(4)
-                    c1.metric("Price", f"${float(p.current_price):.2f}")
-                    c2.metric("Entry", f"${float(p.avg_entry_price):.2f}")
-                    c3.metric("Day P/L", f"${float(p.unrealized_intraday_pl):.2f}")
-                    c4.metric("Total", f"${float(p.unrealized_pl):.2f}")
-        else: st.info("No active positions.")
-    except Exception as e: st.error(str(e))
+with t1: # ASSETS
+    positions = broker.get_all_positions()
+    if positions:
+        for p in positions:
+            with st.expander(f"{p.symbol} | {float(p.qty):.1f} sh | P/L: ${float(p.unrealized_pl):.2f}"):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Price", f"${float(p.current_price):.2f}")
+                c2.metric("P/L %", f"{float(p.unrealized_plpc or 0)*100:+.2f}%")
+                c3.metric("Value", f"${float(p.market_value):,.2f}")
+    else: st.info("No active positions.")
 
-with t2:
+with t3: # FULL MANUAL TICKET
+    st.subheader("🕹️ Advanced Manual Ticket")
+    with st.form("manual_trade"):
+        c1, c2, c3, c4 = st.columns(4)
+        msym = c1.text_input("Symbol", "TSLA").upper()
+        mqty = c2.number_input("Qty", 1.0)
+        mside = c3.selectbox("Side", ["buy", "sell"])
+        mtype = c4.selectbox("Type", ["market", "limit", "stop", "trailing_stop"])
+        
+        p1, p2, p3 = st.columns(3)
+        lpx = p1.number_input("Limit $", 0.0); spx = p2.number_input("Stop $", 0.0); tif = p3.selectbox("TIF", ["gtc", "day"])
+        
+        st.caption("Bracket Guardrails")
+        b1, b2 = st.columns(2)
+        tp = b1.number_input("Take Profit $", 0.0); sl = b2.number_input("Stop Loss $", 0.0)
+        
+        if st.form_submit_button("🚀 Submit Order", use_container_width=True):
+            ok, res = broker.submit_order_v2(mtype, symbol=msym, qty=mqty, side=mside, limit_price=lpx if lpx>0 else None, time_in_force=tif)
+            if ok: st.success(f"Sent: {res}")
+            else: st.error(res)
+
+with t4: # PERSISTENT EXECUTION
+    st.subheader("⚡ Persistent History")
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql("SELECT * FROM strategies", conn)
-        if not df.empty:
-            c = st.columns([1,1,1,1,1,1])
-            c[0].markdown("**Symbol**"); c[3].markdown("TP"); c[4].markdown("SL")
-            st.divider()
-            for i, r in df.iterrows():
-                try:
-                    p = json.loads(r['params'])
-                    c = st.columns([1,1,1,1,1,1])
-                    c[0].markdown(f"**{r['symbol']}**")
-                    c[1].caption(f"RSI<{p.get('rsi_trend')}")
-                    c[2].caption(f"ADX>{p.get('adx_trend')}")
-                    c[3].markdown(f"<span style='color:green'>+{p.get('target',0)*100:.1f}%</span>", unsafe_allow_html=True)
-                    c[4].markdown(f"<span style='color:red'>-{p.get('stop',0)*100:.1f}%</span>", unsafe_allow_html=True)
-                    if c[5].button("🗑️", key=f"d_{r['symbol']}"):
-                        delete_strategy(r['symbol']); st.rerun()
-                    st.markdown("<div class='strategy-row'></div>", unsafe_allow_html=True)
-                except: pass
-        else: st.info("No strategies.")
+        try:
+            df = pd.read_sql("SELECT * FROM trade_execution ORDER BY submitted_at DESC", conn)
+            st.dataframe(df, use_container_width=True, height=450)
+        except: st.info("No records found.")
 
-with t3:
-    st.subheader("🕹️ Manual Trade Ticket")
-    with st.form("manual"):
-        c1,c2,c3,c4 = st.columns(4)
-        sym = c1.text_input("Sym", "TSLA"); qty = c2.number_input("Qty", 1.0); side = c3.selectbox("Side", ["buy","sell"]); type = c4.selectbox("Type", ["market","limit","stop"])
-        c5,c6,c7 = st.columns(3)
-        lp = c5.number_input("Limit $", 0.0); sp = c6.number_input("Stop $", 0.0); tp = c7.number_input("Trail %", 0.0)
-        if st.form_submit_button("🚀 Submit"):
-            ok, m = broker.submit_manual_order(sym, qty, side, type, lp if lp>0 else None, sp if sp>0 else None, tp if tp>0 else None)
-            if ok: st.success(m); time.sleep(1); st.rerun()
-            else: st.error(m)
-
-with t4:
-    st.subheader("⚡ Live Trade Forensics")
-    c1, c2 = st.columns([1,4]); auto = c1.checkbox("🔴 Live Monitor", True); c2.caption("Streams latency & fill data")
-    
-    ph = st.empty()
-    while True:
-        try: broker.sync_tca_logs()
-        except: pass
-        
-        with sqlite3.connect(DB_PATH) as conn:
-            df = pd.read_sql("SELECT * FROM trade_execution ORDER BY submitted_at DESC LIMIT 50", conn)
-        
-        with ph.container():
-            if not df.empty:
-                avg_api = df.head(5)['api_latency_ms'].mean()
-                avg_fill = df.head(5)['fill_latency_ms'].mean()
-                m1, m2 = st.columns(2)
-                m1.metric("API Latency (Last 5)", f"{avg_api:.0f} ms")
-                m2.metric("Fill Speed (Last 5)", f"{avg_fill:.0f} ms")
-                
-                disp = df[['submitted_at', 'symbol', 'side', 'order_type', 'api_latency_ms', 'fill_latency_ms', 'slippage_pct', 'status']].copy()
-                disp.columns = ['Time', 'Sym', 'Side', 'Type', 'API(ms)', 'Fill(ms)', 'Slip%', 'Status']
-                st.dataframe(disp.style.format({'API(ms)': '{:.0f}', 'Fill(ms)': '{:.0f}', 'Slip%': '{:.4f}%'}), use_container_width=True)
-            else: st.info("No trades recorded yet.")
-        
-        if not auto: break
-        time.sleep(2)
-
-with t5:
+with t5: # Diagnostics Tab
     st.header("🔍 System Diagnostics")
     
-    # 1. System Health
-    st.subheader("1. System Health")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Container Hostname", socket.gethostname())
-    c2.metric("Python Version", platform.python_version())
+    # 1. Physical Resource Gauges
+    r1, r2, r3 = st.columns(3)
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
     
-    # Check Heartbeat File
-    hb_path = "/tmp/heartbeat"
-    if os.path.exists(hb_path):
-        last_beat = os.path.getmtime(hb_path)
-        diff = time.time() - last_beat
-        status = "✅ Alive" if diff < 60 else f"⚠️ Stalled ({int(diff)}s ago)"
-        c3.metric("Heartbeat", status, delta=f"{int(diff)}s ago", delta_color="inverse")
-    else:
-        c3.metric("Heartbeat", "❌ Missing")
+    # RAM
+    r1.metric("RAM Usage", f"{mem.percent}%", f"{mem.used//1024**2}MB Used")
+    
+    # DISK (The "Nuke" Indicator)
+    disk_color = "normal" if disk.percent < 85 else "inverse"
+    r2.metric("Disk Space", f"{disk.free//1024**3}GB Free", f"{disk.percent}% Used", delta_color=disk_color)
+    
+    # LATENCY
+    avg_lat = broker.get_mean_latency_24h()
+    r3.metric("Avg Latency (24h)", f"{avg_lat:.1f}ms")
 
     st.divider()
-
-    # 2. Environment Variables (Safe View)
-    st.subheader("2. Environment Config")
     
-    def mask_key(k):
-        v = os.getenv(k)
-        if not v: return "❌ Not Set"
-        if len(v) < 8: return "******"
-        return f"{v[:4]}...{v[-4:]} (Len: {len(v)})"
-
-    env_cols = st.columns(2)
-    with env_cols[0]:
-        st.caption("🔑 Credentials Status")
-        st.text_input("APIKEY (Live)", mask_key("APIKEY"), disabled=True)
-        st.text_input("SECRETKEY (Live)", mask_key("SECRETKEY"), disabled=True)
-        st.text_input("APIKEY_PAPER", mask_key("APIKEY_PAPER"), disabled=True)
-        st.text_input("SECRETKEY_PAPER", mask_key("SECRETKEY_PAPER"), disabled=True)
-    
-    with env_cols[1]:
-        st.caption("🌍 Endpoints")
-        st.text_input("PAPER_URL", os.getenv("PAPER_URL", "Default"), disabled=True)
-        st.text_input("LIVE_URL", os.getenv("LIVE_URL", "Default"), disabled=True)
-        st.text_input("REPORT_LINK", mask_key("REPORT_LINK"), disabled=True)
-
-    st.divider()
-
-    # 3. Database Health
-    st.subheader("3. Database Health")
-    if os.path.exists(DB_PATH):
-        size_kb = os.path.getsize(DB_PATH) / 1024
-        st.write(f"📁 **DB Path:** `{DB_PATH}` ({size_kb:.1f} KB)")
-        
-        with sqlite3.connect(DB_PATH) as conn:
-            try:
-                tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)
-                if not tables.empty:
-                    st.caption("Table Row Counts:")
-                    cols = st.columns(len(tables))
-                    for idx, row in tables.iterrows():
-                        tbl = row['name']
-                        count = pd.read_sql(f"SELECT COUNT(*) as c FROM {tbl}", conn).iloc[0]['c']
-                        cols[idx % len(cols)].metric(tbl, count)
-                
-                with st.expander("🔎 Inspect Raw Data Tables"):
-                    sel_table = st.selectbox("Select Table", tables['name'].tolist())
-                    st.dataframe(pd.read_sql(f"SELECT * FROM {sel_table} ORDER BY rowid DESC LIMIT 50", conn), use_container_width=True)
-            except Exception as e:
-                st.error(f"DB Read Error: {e}")
-    else:
-        st.error(f"❌ Database file not found at {DB_PATH}")
-
-    st.divider()
-
-    # 4. Network Diagnostics
-    st.subheader("4. Network Diagnostics")
-    if st.button("ping Alpaca API"):
-        try:
-            st.write("Pinging Alpaca...")
-            start = time.time()
-            broker.api.get_clock()
-            latency = (time.time() - start) * 1000
-            st.success(f"✅ Connection Successful! Latency: **{latency:.0f} ms**")
-        except Exception as e:
-            st.error(f"❌ Connection Failed: {e}")
+    # 2. Key Check & Endpoint Status
+    st.subheader("2. API Routing Logic")
+    act_key, _, is_paper = Config.get_auth()
+    st.markdown(f"""<div class="debug-card">
+        <b>Active Mode:</b> {Config.MODE}<br>
+        <b>In-Use Key:</b> {act_key[:4]}...{act_key[-4:]}<br>
+        <b>Target Endpoint:</b> {"Paper Simulator" if is_paper else "Live Exchange"}
+    </div>""", unsafe_allow_html=True)
 
 // src/database.py
 import sqlite3
@@ -1051,338 +915,138 @@ import time
 import numpy as np
 import yfinance as yf
 import pandas as pd
-import subprocess
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
 from src.broker import Broker
 from src.notifications import send_trade_notification
 
-# Set Market Timezone to New York
-MARKET_TZ = "America/New_York"
-
 def process_manual_queue(broker):
     try:
         orders = get_pending_manual_orders()
         for o in orders:
             o_id, sym, qty, side, o_type = o
-            try:
-                broker.submit_manual_order(sym, qty, side, o_type)
-                update_manual_order_status(o_id, 'COMPLETED')
-                
-                # --- TRIGGER: Manual Trade Executed ---
-                print(f"✅ Manual Order {sym} Completed. Sending Report...")
-                send_trade_notification()
-                
-            except Exception:
-                update_manual_order_status(o_id, 'FAILED')
+            ok, msg = broker.submit_order(sym, qty, side, o_type)
+            status = 'COMPLETED' if ok else 'FAILED'
+            update_manual_order_status(o_id, status)
+            if ok: send_trade_notification()
     except Exception as e:
-        print(f"Error in manual queue: {e}")
-
-def daily_summary():
-    broker = Broker()
-    try:
-        stats = broker.get_account_stats()
-        perf = broker.get_portfolio_history_stats()
-        print(f"Daily Stats: {stats} | Performance: {perf}")
-    except: pass
-
-def run_reoptimization():
-    print("🧠 Starting Weekly Re-Optimization...")
-    try:
-        subprocess.Popen(["python", "src/tuner.py"])
-        print("✅ Optimization started in background")
-    except Exception as e:
-        print(f"❌ Failed to start optimizer: {e}")
+        print(f"Manual Queue Error: {e}")
 
 def heart_beat():
-    with open("/tmp/heartbeat", "w") as f:
-        f.write(str(time.time()))
+    # 1. Update Heartbeat File
+    with open("/tmp/heartbeat", "w") as f: f.write(str(time.time()))
 
     broker = Broker()
-    try:
-        msg = broker.get_market_clock()
-        market_open = "🟢" in msg
-        update_status("api_health", msg)
-    except:
-        update_status("api_health", "🔴 API DISCONNECTED")
-        return
+    
+    # 2. Check Connection
+    ok, msg = broker.test_connection()
+    update_status("api_health", msg)
+    if not ok: return
 
-    # Check for manual orders regardless of market status (queued)
+    # 3. Manual Orders (Always run)
     process_manual_queue(broker)
 
+    # 4. Check Engine Switch
     if get_status("engine_running") == "0": return
 
-    if market_open:
-        strategies = get_strategies()
-        num_symbols = len(strategies) if len(strategies) > 0 else 1
+    # 5. Check Market Open
+    if "Closed" in broker.get_market_clock(): return
 
+    # 6. Strategy Logic
+    strategies = get_strategies()
+    if not strategies: return
+
+    stats = broker.get_account_stats()
+    cash = stats.get('Cash', 0.0)
+    equity = stats.get('Equity', 0.0)
+    target_per_stock = equity / len(strategies)
+
+    for sym, p in strategies.items():
+        # A. Get Data
+        df = yf.download(sym, period="5d", interval="1h", progress=False)
+        if df.empty: continue
+        
+        # B. Calc Indicators
+        # (Assuming simple close series)
+        close = df['Close']
+        if isinstance(close, pd.DataFrame): close = close.iloc[:,0]
+        
         try:
-            account = broker.api.get_account()
-            total_equity = float(account.portfolio_value)
-            cash_available = float(account.cash)
-        except: return
+            rsi = RSIIndicator(close).rsi().iloc[-1]
+            adx = ADXIndicator(df['High'], df['Low'], close).adx().iloc[-1]
+        except: continue
 
-        target_usd_per_stock = total_equity / num_symbols
+        # C. Check Positions
+        pos = broker.is_holding(sym)
 
-        for sym, p in strategies.items():
-            # 1. Download (Shape Fix + Threadless)
-            df = yf.download(sym, period="5d", interval="1h", progress=False, threads=False)
-            if df.empty: continue
-
-            # --- CRITICAL FIX: Flatten 2D Data ---
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            for c in ["High", "Low", "Close"]:
-                if c in df.columns:
-                    s = df[c]
-                    if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
-                    df[c] = pd.Series(np.asarray(s).reshape(-1), index=df.index)
-            # -------------------------------------
-
-            # 2. Indicators
-            try:
-                adx_gen = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
-                rsi_gen = RSIIndicator(close=df['Close'], window=14)
-                curr_rsi = rsi_gen.rsi().iloc[-1]
-                curr_adx = adx_gen.adx().iloc[-1]
-            except: continue
-
-            # 3. Execution
-            is_holding = broker.is_holding(sym)
-            has_pending = broker.has_open_order(sym)
-
-            if not is_holding and not has_pending:
-                if curr_adx > p.get('adx_trend', 25) and curr_rsi > p.get('rsi_trend', 50):
-                    try:
-                        current_price = float(broker.api.get_latest_trade(sym).price)
-                        allowed_spend = min(target_usd_per_stock, cash_available)
-                        qty = int(allowed_spend / current_price)
-                        if qty > 0:
-                            print(f"🚀 BUY SIGNAL: {sym}")
-                            broker.buy_bracket(sym, qty, p['target'], p['stop'])
-                            cash_available -= (qty * current_price)
-                            
-                            # --- TRIGGER: Auto Buy Executed ---
+        # D. Logic
+        if not pos:
+            # ENTRY
+            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
+                price = broker.get_latest_price(sym)
+                if price > 0 and cash > price:
+                    qty = int(min(cash, target_per_stock) / price)
+                    if qty >= 1:
+                        # CALCULATE BRACKET PRICES
+                        tp_price = round(price * (1 + p['target']), 2)
+                        sl_price = round(price * (1 - p['stop']), 2)
+                        
+                        # EXECUTE BRACKET
+                        if broker.buy_bracket(sym, qty, tp_price, sl_price):
                             send_trade_notification()
-                            
-                    except: pass
-
-            elif is_holding:
-                if curr_rsi < 40:
-                    broker.sell_all(sym)
-                    
-                    # --- TRIGGER: Auto Sell Executed ---
-                    print(f"📉 SELL SIGNAL: {sym}")
-                    send_trade_notification()
+                            cash -= (qty * price) # Adjust local cash estimate
+        else:
+            # EXIT (Panic / Strategy Exit)
+            # Note: The Bracket order handles TP/SL automatically!
+            # We only need to force sell if RSI indicates a crash not caught by SL
+            if rsi < 40:
+                broker.close_position(sym)
+                send_trade_notification()
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trading Heart Started...")
+    print("🚀 Algo-Trader (Alpaca-Py Edition) Starting...")
     schedule.every(1).minutes.do(heart_beat)
-    schedule.every().day.at("21:00").do(daily_summary)
-    schedule.every().sunday.at("04:00").do(run_reoptimization)
-    heart_beat()
     while True:
         schedule.run_pending()
         time.sleep(1)
 
 // src/notifications.py
-import os
+from alpaca.trading.client import TradingClient
+from src.config import Config
 import requests
-from alpaca_trade_api.rest import REST
+import datetime
 
-# --- Configuration (Based on Jenkins .env) ---
-
-# LIVE Keys (Mapped to standard APIKEY/SECRETKEY)
-API_KEY_LIVE = os.getenv("APIKEY")
-API_SECRET_LIVE = os.getenv("SECRETKEY")
-URL_LIVE = os.getenv("LIVE_URL", "https://api.alpaca.markets")
-
-# PAPER Keys (Mapped to APIKEY_PAPER)
-API_KEY_PAPER = os.getenv("APIKEY_PAPER")
-API_SECRET_PAPER = os.getenv("SECRETKEY_PAPER")
-URL_PAPER = os.getenv("PAPER_URL", "https://paper-api.alpaca.markets")
-
-REPORT_URL = os.getenv("REPORT_LINK")
-
-
-def get_portfolio_value_usd(api):
+def send_trade_notification():
+    """Compiles and sends the Slack report"""
+    if not Config.REPORT_URL: return
+    
+    # Auth for the reporter
+    key, secret, is_paper = Config.get_auth(Config.MODE)
     try:
-        account = api.get_account()
-        return float(account.portfolio_value)
-    except Exception:
-        return 0.0
-
-
-def get_buying_power(api):
-    try:
-        account = api.get_account()
-        return float(account.buying_power)
-    except Exception:
-        return 0.0
-
-
-def get_all_balances_sorted(api):
-    try:
-        positions = api.list_positions()
-        account = api.get_account()
-        orders = api.list_orders()
-    except Exception:
-        return {}
-
-    # 1. Start with Cash
-    ordered_balances = {}
-    ordered_balances[f"{'USD':<6}"] = f"${float(account.cash):.2f}"
-
-    # 2. Collect and Sort Positions
-    position_list = []
-    for position in positions:
-        market_val = float(position.market_value) if position.market_value else 0.0
-        position_list.append({
-            'symbol': position.symbol,
-            'market_value': market_val,
-            'pl_pct': float(position.unrealized_plpc) * 100
-        })
-
-    # Sort: P/L Descending
-    position_list.sort(key=lambda x: x['pl_pct'], reverse=True)
-
-    # 3. Format Strings for Alignment
-    for pos in position_list:
-        key = f"{pos['symbol']:<6}"
-        val_str = f"${pos['market_value']:.2f}"
-        value = f"{val_str:<10} P/L: {pos['pl_pct']:+.2f}%"
-        ordered_balances[key] = value
-
-    # 4. Add Open Orders
-    for order in orders:
-        if order.status in ("open", "accepted"):
-            stock_name = order.symbol
-            key = f"{stock_name:<6}"
-            if not any(k.strip() == stock_name for k in ordered_balances):
-                ordered_balances[key] = f"{'$0.00':<10} (Open Order)"
-
-    return ordered_balances
-
-
-def send_webhook_report(data, as_code_block=False):
-    if not REPORT_URL:
-        return
-    lines = [f"{key}: {value}" for key, value in data.items()]
-    text_block = "\n".join(lines)
-    if as_code_block:
-        text_block = f"```\n{text_block}\n```"
-    try:
-        requests.post(REPORT_URL, json={"text": text_block})
+        client = TradingClient(key, secret, paper=is_paper)
+        acc = client.get_account()
+        
+        # Build Message
+        msg = f"✅ **Trade Executed** ({Config.MODE})\n"
+        msg += f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        msg += f"Equity: ${float(acc.portfolio_value):.2f}\n"
+        msg += f"Cash: ${float(acc.cash):.2f}\n"
+        
+        # Positions
+        positions = client.get_all_positions()
+        if positions:
+            msg += "\n**Positions:**\n"
+            msg += "```\n"
+            for p in positions:
+                pl_pct = float(p.unrealized_plpc) * 100
+                msg += f"{p.symbol:<6} ${float(p.market_value):<8.2f} P/L: {pl_pct:+.2f}%\n"
+            msg += "```"
+            
+        requests.post(Config.REPORT_URL, json={"text": msg})
     except Exception as e:
-        print(f"Webhook Error: {e}")
-
-
-def _fmt_pct(pct):
-    return "N/A" if pct is None else f"{pct:+.2f}%"
-
-
-def _first_nonzero(values):
-    for v in values:
-        try:
-            fv = float(v)
-            if fv > 0:
-                return fv
-        except Exception:
-            continue
-    return None
-
-
-def get_portfolio_return_pct(api, period, timeframe="1D", extended_hours=False):
-    try:
-        history = api.get_portfolio_history(period=period, timeframe=timeframe, extended_hours=extended_hours)
-    except Exception:
-        return None
-
-    equity_series = list(getattr(history, "equity", []) or [])
-    if not equity_series:
-        return None
-
-    try:
-        end_equity = float(equity_series[-1])
-    except Exception:
-        return None
-
-    base_value = float(getattr(history, "base_value", 0) or 0)
-    if base_value <= 0:
-        base_value = _first_nonzero(equity_series) or 0.0
-    if base_value <= 0:
-        return None
-
-    return (end_equity / base_value - 1.0) * 100.0
-
-
-def get_performance_summary(api):
-    day_pct = get_portfolio_return_pct(api, "1D", "15Min", True)
-    month_pct = get_portfolio_return_pct(api, "1M", "1D", False)
-    year_pct = get_portfolio_return_pct(api, "1A", "1D", False)
-    total_pct = get_portfolio_return_pct(api, "all", "1D", False)
-
-    return {
-        "Day": _fmt_pct(day_pct),
-        "Month": _fmt_pct(month_pct),
-        "Year": _fmt_pct(year_pct),
-        "Total": _fmt_pct(total_pct),
-    }
-
-
-def run_report_cycle(api, label):
-    balances = get_all_balances_sorted(api)
-    if balances:
-        # 1. Header
-        send_webhook_report({
-            "--------------------------------------": "",
-            f"📊 {label}": "",
-            "--------------------------------------": ""
-        }, as_code_block=False)
-
-        # 2. Stock List
-        send_webhook_report(balances, as_code_block=True)
-
-        # 3. Financials
-        send_webhook_report({
-            "BUYING_POWER": f"${get_buying_power(api):.2f}",
-            "TOTAL_PORTFOLIO": f"${get_portfolio_value_usd(api):.2f}",
-        }, as_code_block=False)
-
-        # 4. Performance
-        send_webhook_report({"Performance Metrics": ""}, as_code_block=False)
-        send_webhook_report(get_performance_summary(api), as_code_block=False)
-
-
-def send_trade_notification(time_str=None):
-    """Main entry point called by the bot"""
-    print("📤 Sending Slack Report...")
-
-    # Send Time Header
-    if not time_str:
-        from datetime import datetime
-        time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    send_webhook_report({"✅ Trade Executed": "", "Time": time_str}, as_code_block=False)
-
-    # Report LIVE (Uses APIKEY)
-    if API_KEY_LIVE and API_SECRET_LIVE:
-        try:
-            live_api = REST(API_KEY_LIVE, API_SECRET_LIVE, URL_LIVE)
-            run_report_cycle(live_api, "LIVE ACCOUNT")
-        except Exception as e:
-            print(f"Live Report Error: {e}")
-
-    # Report PAPER (Uses APIKEY_PAPER)
-    if API_KEY_PAPER and API_SECRET_PAPER:
-        try:
-            paper_api = REST(API_KEY_PAPER, API_SECRET_PAPER, URL_PAPER)
-            run_report_cycle(paper_api, "PAPER ACCOUNT")
-        except Exception as e:
-            print(f"Paper Report Error: {e}")
+        print(f"Notification Error: {e}")
 
 // src/tuner.py
 import yfinance as yf
