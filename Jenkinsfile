@@ -16,14 +16,16 @@ pipeline {
         }
         stage('Build & Deploy') {
             steps {
-                // FORCE network=host to bypass Jenkins 404/Stapler proxy issues
-                sh "docker compose build --no-cache --pull"
+                // We use --build-arg and --network host to bridge the connection gap
+                sh "docker compose build --no-cache --pull --build-arg HTTP_PROXY='' --build-arg HTTPS_PROXY=''"
+                
+                // This is the key: manually building with host network if compose fails to bridge
+                sh "docker build --network=host -t algo-trader-bot . "
+
                 sh "docker compose up -d"
                 
-                // Give the container 5 seconds to wake up before running analyzer
                 sh "sleep 5"
                 sh "docker exec algo_heart python src/analyzer.py"
-                
                 sh "docker image prune -f"
             }
         }
