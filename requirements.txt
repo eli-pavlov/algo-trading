@@ -1,4 +1,4 @@
-﻿alpaca-trade-api
+alpaca-trade-api
 krakenex
 pykrakenapi
 yfinance
