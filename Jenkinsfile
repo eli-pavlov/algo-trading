@@ -6,13 +6,11 @@ pipeline {
     stages {
         stage('Sanitize Disk') {
             steps {
-                echo "🧹 Pruning Docker caches to free up space..."
-                // Removes the specific Buildx state that was taking 2.6GB
+                echo "🧹 Pruning Docker caches..."
+                // Buildx cache is often the biggest hidden space eater
                 sh "docker builder prune -f"
-                // Removes unused images and dangling layers
-                sh "docker image prune -f"
-                // Clear system logs older than 1 day to prevent /var/log bloat
-                sh "sudo journalctl --vacuum-time=1d || true"
+                // Clean logs safely with NOPASSWD
+                sh "sudo journalctl --vacuum-time=1d || echo 'Sudo failed, skipping log cleanup'"
             }
         }
         stage('Checkout') {
@@ -21,7 +19,8 @@ pipeline {
         stage('Prepare Secrets') {
             steps {
                 withCredentials([file(credentialsId: 'algo-trading-env', variable: 'SECRET_ENV')]) {
-                    sh 'cp "$SECRET_ENV" .env'
+                    // Added -f to force overwrite and ensure permissions are fresh
+                    sh 'cp -f "$SECRET_ENV" .env'
                 }
             }
         }
@@ -34,22 +33,25 @@ pipeline {
                 }
             }
             steps {
-                // Using --no-cache here is safer when disk is tight to prevent partial layer bloat
-                sh "docker build --network=host --no-cache -t ${DOCKER_IMAGE} ."
+                echo "📦 Building Docker Image..."
+                sh "docker build --network=host -t ${DOCKER_IMAGE} ."
             }
         }
         stage('Deploy & Refresh') {
             steps {
+                echo "🚀 Deploying Logic..."
                 sh "docker compose up -d --remove-orphans"
+                // Forces the bot to reload the python code from the bind mount
                 sh "docker compose restart trading-bot"
                 sh "sleep 5"
+                // Check if heart is alive before tuning
                 sh "docker exec algo_heart python src/tuner.py"
             }
         }
     }
     post {
-        success {
-            echo "✅ Build Successful. Final cleanup..."
+        always {
+            // Reclaim space immediately after every build
             sh "docker image prune -f"
         }
     }
