@@ -4,24 +4,29 @@ import json
 
 DB_PATH = os.getenv("DB_PATH", "data/trading.db")
 
-
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
+        # Strategy storage
         conn.execute("CREATE TABLE IF NOT EXISTS strategies (symbol TEXT PRIMARY KEY, params TEXT, is_active INTEGER)")
+        # Equity tracking
         conn.execute("CREATE TABLE IF NOT EXISTS equity_history (timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, balance REAL)")
+        # NEW: System state (Engine Toggle, API Health)
+        conn.execute("CREATE TABLE IF NOT EXISTS system_status (key TEXT PRIMARY KEY, value TEXT)")
+        # NEW: Manual Command Queue
+        conn.execute("CREATE TABLE IF NOT EXISTS manual_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, qty REAL, side TEXT, type TEXT, status TEXT DEFAULT 'PENDING')")
+        
+        # Default state
+        conn.execute("INSERT OR IGNORE INTO system_status (key, value) VALUES ('engine_running', '1')")
+        conn.execute("INSERT OR IGNORE INTO system_status (key, value) VALUES ('api_health', 'Unknown')")
 
-
-def save_strategy(symbol, params, is_holding):
-    if is_holding:
-        print(f"⚠️ {symbol} is currently active. Skipping rotation.")
-        return
+def update_status(key, value):
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT INTO strategies (symbol, params, is_active) VALUES (?,?,1) "
-                     "ON CONFLICT(symbol) DO UPDATE SET params=excluded.params",
-                     (symbol, json.dumps(params)))
+        conn.execute("INSERT OR REPLACE INTO system_status (key, value) VALUES (?, ?)", (key, str(value)))
 
-
-def get_strategies():
+def get_status(key, default="0"):
     with sqlite3.connect(DB_PATH) as conn:
-        return {r[0]: json.loads(r[1]) for r in conn.execute("SELECT symbol, params FROM strategies WHERE is_active=1")}
+        res = conn.execute("SELECT value FROM system_status WHERE key = ?", (key,)).fetchone()
+        return res[0] if res else default
+
+# ... keep existing save_strategy and get_strategies functions ...
