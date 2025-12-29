@@ -18,3 +18,7 @@ cache/
 # IDE
 .vscode/
 .idea/
+
+# Strategies and settings
+strategies.yaml
+settings.yaml
