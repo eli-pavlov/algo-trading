@@ -1,31 +1,15 @@
-version: '3.8'
 services:
   trading-bot:
     image: algo-trader
-    container_name: algo_heart
-    restart: always
-    env_file: .env
-    network_mode: "host"
-    # PRESERVED: Data persistence
     volumes:
       - ./data:/app/data
-    deploy:
-      resources:
-        limits:
-          memory: 3G
-        reservations:
-          memory: 512M  # Lowered reservation so container starts easier on limited hosts
-    healthcheck:
-      test: ["CMD-SHELL", "find /tmp/heartbeat -mmin -2 | grep . || exit 1"]
-      interval: 1m
-      retries: 3
+      - ./src:/app/src           # <--- Maps your logic folder
+      - ./config:/app/config     # <--- Maps your strategy settings
+    # ... rest of config ...
 
   dashboard:
     image: algo-trader
-    container_name: algo_ui
-    restart: always
-    network_mode: "host"
-    env_file: .env
     volumes:
       - ./data:/app/data
-    command: streamlit run src/dashboard.py --server.port=8501 --server.address=0.0.0.0
+      - ./src:/app/src           # <--- Maps your logic folder
+    # ... rest of config ...

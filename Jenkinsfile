@@ -1,7 +1,6 @@
 pipeline {
     agent any
     environment {
-        // This variable isn't strictly needed anymore but good for reference
         DOCKER_IMAGE = "algo-trader"
     }
     stages {
@@ -15,21 +14,36 @@ pipeline {
                 }
             }
         }
-        stage('Build & Deploy') {
+        
+        // --- STAGE A: Build Image (Only if dependencies changed) ---
+        stage('Build Image') {
+            when {
+                anyOf {
+                    changeset "requirements.txt"
+                    changeset "Dockerfile"
+                    changeset "Jenkinsfile"
+                    // If the image doesn't exist at all, we must build it
+                    expression { sh(script: "docker images -q ${DOCKER_IMAGE} == ''", returnStatus: true) == 0 }
+                }
+            }
             steps {
-                // 1. Build the image using HOST networking
-                // This allows pip to connect to PyPI successfully (like your manual test)
-                sh "docker build --network=host -t algo-trader ."
+                sh "docker build --network=host -t ${DOCKER_IMAGE} ."
+            }
+        }
 
-                // 2. Start containers using the image we just built
-                // We remove orphans to clean up any old containers from previous failed builds
+        // --- STAGE B: Deploy & Update Logic ---
+        stage('Deploy & Refresh') {
+            steps {
+                // Because of the 'volumes' in docker-compose.yaml, 
+                // simply running 'up -d' will pick up new .py files immediately.
                 sh "docker compose up -d --remove-orphans"
                 
-                // 3. Wait for boot and Train
+                // If the container was already running, it needs a restart 
+                // to refresh the Python process memory with the new logic.
+                sh "docker compose restart trading-bot"
+                
                 sh "sleep 5"
                 sh "docker exec algo_heart python src/tuner.py"
-                
-                // 4. Cleanup dangling images to save disk space
                 sh "docker image prune -f"
             }
         }
