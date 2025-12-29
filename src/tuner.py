@@ -4,6 +4,7 @@ import pandas_ta_classic as ta
 import optuna
 import urllib3
 import pandas as pd
+import numpy as np
 import gc
 import shutil
 from functools import partial
@@ -12,111 +13,185 @@ from src.broker import Broker
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Tuner operates on the specific list of stocks you want to trade
 TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
-
-def objective(trial, df):
-    # Reduced search space for stability
-    adx_threshold = trial.suggest_int("adx_trend", 20, 30)
-    rsi_threshold = trial.suggest_int("rsi_trend", 45, 60)
-    tp = trial.suggest_float("target", 0.10, 0.30)
-    sl = trial.suggest_float("stop", 0.05, 0.10)
-
-    df_copy = df.copy()
-
-    # Check for valid data length for indicators
-    if len(df_copy) < 50:
-        return -100
-
-    # Calculate ADX safely
-    try:
-        adx_df = ta.adx(df_copy['High'], df_copy['Low'], df_copy['Close'], length=14)
-        if adx_df is None or adx_df.empty:
-            return -100
-
-        # Use position-based indexing (safer than name-based)
-        df_copy['ADX'] = adx_df.iloc[:, 0]
-        df_copy['RSI'] = ta.rsi(df_copy['Close'], length=14)
-        df_copy.dropna(subset=['ADX', 'RSI'], inplace=True)
-    except Exception:
-        return -100
-
-    score, in_pos, entry = 0, False, 0
-    # Vectorized calculation is faster but iterating is fine for logic clarity
-    for i in range(len(df_copy)):
-        price = df_copy['Close'].iloc[i]
-        curr_adx = df_copy['ADX'].iloc[i]
-        curr_rsi = df_copy['RSI'].iloc[i]
-
-        if not in_pos:
-            if curr_adx > adx_threshold and curr_rsi > rsi_threshold:
-                entry, in_pos = price, True
-        else:
-            if price >= entry * (1 + tp):
-                score += tp
-                in_pos = False
-            elif price <= entry * (1 - sl):
-                score -= sl
-                in_pos = False
-    return score
-
-
 def get_stock_data(symbol):
-    """Helper to fetch and clean data, isolated for linter safety."""
+    """
+    Downloads and cleans data.
+    - Fixed: auto_adjust=False (keeps raw OHLC)
+    - Fixed: Robust flattening of MultiIndex
+    """
     try:
-        df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False)
-        if df.empty:
-            return None
+        # Threads=False for ARM/Docker stability
+        df = yf.download(symbol, period="1y", interval="1h", 
+                         progress=False, threads=False, auto_adjust=False)
+        
+        if df.empty: return None
 
+        # 1. Fix MultiIndex Columns (Ticker -> Price)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+
+        # 2. Fix 2D Array Issues (The "Shape" Fix)
+        for c in ["Open", "High", "Low", "Close"]:
+            if c in df.columns:
+                s = df[c]
+                if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
+                df[c] = pd.Series(np.asarray(s).reshape(-1), index=df.index)
 
         return df
     except Exception as e:
         print(f"❌ Download failed for {symbol}: {e}")
         return None
 
+def precompute_indicators(df):
+    """
+    Calculates indicators ONCE before optimization loop.
+    - Fixed: Robust ADX column selection
+    """
+    df = df.copy()
+    try:
+        # ADX (Directional Movement)
+        adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+        if adx_df is None or adx_df.empty: return None
+        
+        # Find the correct column (ADX_14 or similar)
+        adx_col = next((c for c in adx_df.columns if c.startswith("ADX")), None)
+        if not adx_col: return None
+        
+        df['ADX'] = adx_df[adx_col]
+        
+        # RSI
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        
+        # Shift indicators so Row 'i' sees the metrics from 'i-1' (No Lookahead)
+        df['ADX_Prev'] = df['ADX'].shift(1)
+        df['RSI_Prev'] = df['RSI'].shift(1)
+        
+        df.dropna(inplace=True)
+        return df
+    except Exception:
+        return None
+
+def objective(trial, df):
+    """
+    Simulates trading with REALISTIC constraints.
+    - No Lookahead: Decision made on (i-1), Execution on Open(i)
+    - Intra-bar Exits: Check Low vs SL and High vs TP
+    """
+    # 1. Suggest Parameters
+    adx_thresh = trial.suggest_int("adx_trend", 20, 30)
+    rsi_thresh = trial.suggest_int("rsi_trend", 45, 60)
+    tp_pct = trial.suggest_float("target", 0.10, 0.30)
+    sl_pct = trial.suggest_float("stop", 0.05, 0.10)
+
+    # Convert columns to numpy arrays for massive speed boost
+    opens = df['Open'].values
+    highs = df['High'].values
+    lows  = df['Low'].values
+    closes = df['Close'].values
+    adx_prev = df['ADX_Prev'].values
+    rsi_prev = df['RSI_Prev'].values
+
+    # Simulation State
+    balance = 1000.0  # Virtual starting cash
+    position = 0      # 0 = flat, >0 = shares
+    entry_price = 0.0
+    
+    # 2. Fast Vectorized-Style Loop
+    for i in range(len(df)):
+        # EXIT LOGIC (If we have a position)
+        if position > 0:
+            # Check Stop Loss First (Conservative assumption: SL hits before TP)
+            stop_price = entry_price * (1 - sl_pct)
+            take_price = entry_price * (1 + tp_pct)
+            
+            # Did we hit SL?
+            if lows[i] <= stop_price:
+                # We assume we got filled at the stop price (or Open if it gapped down)
+                exit_fill = min(opens[i], stop_price)
+                balance = position * exit_fill
+                position = 0
+                continue # Trade over
+            
+            # Did we hit TP?
+            if highs[i] >= take_price:
+                # We assume we got filled at target (or Open if it gapped up)
+                exit_fill = max(opens[i], take_price)
+                balance = position * exit_fill
+                position = 0
+                continue # Trade over
+                
+            # Trend Reversal Exit (RSI < 40 safety net)
+            # We use the previous closed RSI to decide to sell at Open[i]
+            if rsi_prev[i] < 40:
+                balance = position * opens[i]
+                position = 0
+                continue
+
+        # ENTRY LOGIC (If we are flat)
+        else:
+            # Decision based on PREVIOUS candle (adx_prev, rsi_prev)
+            # Execution happens at CURRENT Open
+            if adx_prev[i] > adx_thresh and rsi_prev[i] > rsi_thresh:
+                entry_price = opens[i]
+                position = balance / entry_price # All-in
+
+    # Final MTM (Mark to Market) if still holding
+    final_equity = balance if position == 0 else position * closes[-1]
+    
+    # Return Percentage Return as the Score
+    return (final_equity - 1000.0) / 1000.0
 
 def optimize_stock(symbol, broker):
-    print(f"🕵️ Analyzing {symbol}...")
+    print(f"🕵️ Tuning {symbol}...")
 
     # 1. Get Data
-    df = get_stock_data(symbol)
-
-    if df is None or df.empty:
-        print(f"❌ No data for {symbol}")
+    raw_df = get_stock_data(symbol)
+    if raw_df is None or len(raw_df) < 100:
+        print(f"❌ Insufficient data for {symbol}")
         return
 
-    # 2. Optimize
+    # 2. Precompute Indicators (Huge Speedup)
+    df = precompute_indicators(raw_df)
+    if df is None:
+        print(f"❌ Indicator error for {symbol}")
+        return
+
+    # 3. Optimize
     try:
-        study = optuna.create_study(direction="maximize")
+        # Seed=42 ensures that if you run it twice, you get the same 'best' params
+        sampler = optuna.samplers.TPESampler(seed=42)
+        study = optuna.create_study(direction="maximize", sampler=sampler)
 
-        # Use partial to bind df explicitly, which satisfies the linter
+        # Bind the precomputed DF to the objective
         optimization_func = partial(objective, df=df)
-        study.optimize(optimization_func, n_trials=5)
+        
+        # 100 Trials is fast now because we precomputed math
+        study.optimize(optimization_func, n_trials=100) 
 
-        print(f"✅ Best for {symbol}: {study.best_params}")
+        print(f"✅ Best for {symbol}: {study.best_params} (Score: {study.best_value:.2%})")
 
         is_holding = broker.is_holding(symbol)
         save_strategy(symbol, study.best_params, is_holding is not None)
 
         # Cleanup
         del df
+        del raw_df
         del study
         gc.collect()
 
     except Exception as e:
         print(f"⚠️ Optimization error on {symbol}: {e}")
 
-
 if __name__ == "__main__":
     init_db()
-
-    # Clear yfinance cache to prevent corruption errors
-    cache_dir = os.path.expanduser("~/.cache/yfinance")
-    if os.path.exists(cache_dir):
-        shutil.rmtree(cache_dir)
-
     broker = Broker()
+    
+    # Note: We removed the aggressive cache deletion logic.
+    # Only delete cache manually if you suspect data corruption.
+    
+    print("🚀 Starting AI Parameter Tuning...")
     for t in TICKERS:
         optimize_stock(t, broker)
