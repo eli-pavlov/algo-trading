@@ -59,6 +59,18 @@ st.markdown("""
     
     /* Debug Box */
     .debug-card { background: #f0f2f6; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 5px;}
+    
+    /* Logo Styling */
+    .ticker-logo {
+        width: 32px;
+        height: 32px;
+        vertical-align: middle;
+        margin-right: 10px;
+        border-radius: 50%;
+        background-color: #fff; /* Ensure transparent logos look okay */
+        padding: 2px;
+        border: 1px solid #eee;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,7 +93,6 @@ with st.sidebar:
             from alpaca.trading.requests import GetPortfolioHistoryRequest
             hist = broker.client.get_portfolio_history(GetPortfolioHistoryRequest(period="1D", timeframe="15Min"))
             if hist and hist.equity:
-                # Basic error handling for None values in history
                 clean_equity = [x if x is not None else 0 for x in hist.equity]
                 st.area_chart(pd.DataFrame({"Equity": clean_equity}), height=100, color="#29b5e8")
         except: st.caption("Graph unavailable")
@@ -118,38 +129,31 @@ with t1: # ASSETS (COMPACT VIEW)
             symbol = p.symbol
             qty = float(p.qty)
             curr_price = float(p.current_price)
-            avg_price = float(p.avg_entry_price)
             pl_val = float(p.unrealized_pl)
             pl_pct = float(p.unrealized_plpc) * 100
             mkt_val = float(p.market_value)
             
-            # 2. Status Color
-            color_bar = "🟢" if pl_val >= 0 else "🔴"
-            
-            # 3. Fetch & Format Orders
+            # 2. Fetch & Format Orders
             open_orders = broker.get_orders_for_symbol(symbol)
             order_html_list = []
             
             if open_orders:
                 for o in open_orders:
                     # Determine Trigger Price
-                    # Order might be Limit, Stop, or StopLimit
                     trigger = o.limit_price or o.stop_price
                     trigger_val = float(trigger) if trigger else 0.0
                     
                     # Calculate Distance %
                     dist_str = ""
                     if trigger_val > 0 and curr_price > 0:
-                        # FLIPPED SIGN logic: -1 * (Trigger - Current) / Current
                         dist = -1 * ((trigger_val - curr_price) / curr_price) * 100
-                        # Format: (+5.2%) or (-2.1%)
                         dist_str = f" <span style='color:{'#28a745' if dist>0 else '#dc3545'}'>({dist:+.1f}%)</span>"
                     
                     # Determine Label
                     lbl = o.order_type.upper()
                     if o.side == 'sell':
-                        if trigger_val > curr_price: lbl = "🎯 TP" # Target
-                        elif trigger_val < curr_price: lbl = "🛑 SL" # Stop
+                        if trigger_val > curr_price: lbl = "🎯 TP" 
+                        elif trigger_val < curr_price: lbl = "🛑 SL" 
                     
                     price_display = f"${trigger_val:.2f}" if trigger_val > 0 else "MKT"
                     
@@ -161,20 +165,32 @@ with t1: # ASSETS (COMPACT VIEW)
 
             orders_html = "".join(order_html_list)
 
+            # 3. Dynamic Logo URL (TradingView Source)
+            logo_url = f"https://s3-symbol-logo.tradingview.com/{symbol.lower()}.svg"
+            
             # 4. Render Card
             with st.container(border=True):
                 # Header Row
                 c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.2])
-                c1.markdown(f"### {color_bar} {symbol}")
+                
+                # REPLACED CIRCLE WITH LOGO IMG
+                c1.markdown(f"""
+                    <div style="display:flex; align-items:center;">
+                        <img src="{logo_url}" class="ticker-logo" onerror="this.style.display='none'">
+                        <h3 style="margin:0; padding:0;">{symbol}</h3>
+                    </div>
+                """, unsafe_allow_html=True)
+                
                 c2.metric("Qty", f"{qty:.1f}")
                 c3.metric("Price", f"${curr_price:.2f}")
                 
-                # UPDATED P/L METRIC: Primary is %, Secondary is $
-                c4.metric("P/L", f"{pl_pct:+.2f}%", f"${pl_val:+.2f}")
+                # P/L METRIC (Explicit Sign for Delta)
+                delta_str = f"{'+' if pl_val >= 0 else '-'}${abs(pl_val):.2f}"
+                c4.metric("P/L", f"{pl_pct:+.2f}%", delta_str)
                 
                 c5.metric("Value", f"${mkt_val:,.0f}")
                 
-                # Order Row (Custom HTML)
+                # Order Row
                 st.markdown(f"""
                 <div style="margin-top: -10px; margin-bottom: 5px;">
                     {orders_html}
