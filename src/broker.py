@@ -8,7 +8,7 @@ from alpaca.trading.requests import (
     MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, 
     StopLossRequest, GetPortfolioHistoryRequest, GetOrdersRequest
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus, QueryOrderStatus
 from src.config import Config
 from src.database import log_trade_attempt, update_trade_fill, DB_PATH
 
@@ -89,11 +89,30 @@ class Broker:
         except: return None
 
     def get_orders_for_symbol(self, symbol):
-        """Fetches open orders (Limit, Stop, etc) for a specific ticker."""
+        """Fetches active orders (Limit, Stop, etc) for a specific ticker."""
         try:
-            req = GetOrdersRequest(status=OrderStatus.OPEN, symbols=[symbol])
-            return self.client.get_orders(req)
-        except: return []
+            # FIX: Use QueryOrderStatus.ALL to catch 'HELD' and 'NEW' orders
+            # Alpaca defaults to 'OPEN' which hides bracket legs until triggered
+            req = GetOrdersRequest(status=QueryOrderStatus.ALL, symbols=[symbol], limit=50)
+            all_orders = self.client.get_orders(req)
+            
+            # Filter out dead orders manually
+            active_orders = []
+            terminal_states = [
+                OrderStatus.FILLED, 
+                OrderStatus.CANCELED, 
+                OrderStatus.EXPIRED, 
+                OrderStatus.REJECTED
+            ]
+            
+            for o in all_orders:
+                if o.status not in terminal_states:
+                    active_orders.append(o)
+                    
+            return active_orders
+        except Exception as e: 
+            print(f"Order fetch error: {e}")
+            return []
 
     def submit_order_v2(self, order_type, **kwargs):
         """Expanded submitter to handle advanced order types from UI."""
