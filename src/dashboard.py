@@ -5,7 +5,7 @@ import os, socket, platform, json, time, psutil
 from datetime import datetime, timezone
 from src.broker import Broker
 from src.config import Config
-from src.database import get_status, update_status, delete_strategy, DB_PATH
+from src.database import get_status, update_status, delete_strategy, get_strategies, DB_PATH
 
 st.set_page_config(page_title="Algo Command Center", layout="wide")
 
@@ -67,39 +67,67 @@ with t1: # ASSETS
     positions = broker.get_all_positions()
     if positions:
         for p in positions:
-            with st.expander(f"{p.symbol} | {float(p.qty):.1f} sh | P/L: ${float(p.unrealized_pl):.2f}"):
+            # Fetch open orders for this symbol
+            open_orders = broker.get_orders_for_symbol(p.symbol)
+            
+            # Create a summary string for the expander header
+            pl_val = float(p.unrealized_pl)
+            pl_emoji = "🟢" if pl_val >= 0 else "🔴"
+            
+            with st.expander(f"{pl_emoji} {p.symbol} | {float(p.qty):.1f} sh | P/L: ${pl_val:.2f}"):
+                # 1. Position Stats
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Price", f"${float(p.current_price):.2f}")
                 c2.metric("P/L %", f"{float(p.unrealized_plpc or 0)*100:+.2f}%")
                 c3.metric("Value", f"${float(p.market_value):,.2f}")
+                
+                # 2. Pending Orders (Stop Loss / Take Profit)
+                if open_orders:
+                    st.divider()
+                    st.caption("🛑 Pending Orders (TP / SL)")
+                    order_data = []
+                    for o in open_orders:
+                        # Determine order type and price
+                        o_type = o.order_type.upper()
+                        # Some orders have limit, some stop, some neither
+                        price = o.limit_price or o.stop_price or "MKT"
+                        
+                        order_data.append({
+                            "Type": f"{o.side.upper()} {o_type}",
+                            "Qty": o.qty,
+                            "Trigger Price": f"${float(price):.2f}" if price != "MKT" else "MKT",
+                            "Status": o.status.upper()
+                        })
+                    st.dataframe(pd.DataFrame(order_data), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No pending orders.")
+
     else: st.info("No active positions.")
 
 with t2: # ⚙️ STRATEGIES
-    st.subheader("Active Strategy Configurations")
-    yaml_path = "config/strategies.yaml"
+    st.subheader("Active Strategy Configurations (Database)")
     
-    if os.path.exists(yaml_path):
-        with open(yaml_path, "r") as f:
-            config = yaml.safe_load(f)
-            strats = config.get('strategies', {})
+    # Read from Database instead of YAML
+    try:
+        strategies = get_strategies() # From src.database
         
-        if strats:
-            # Create a clean dataframe for display
+        if strategies:
             display_data = []
-            for ticker, params in strats.items():
+            for ticker, params in strategies.items():
                 display_data.append({
                     "Ticker": ticker,
-                    "Enabled": "✅" if params.get('enabled') else "❌",
-                    "Timeframe": params.get('timeframe'),
-                    "Qty": params.get('qty'),
-                    "RSI Panic": params.get('rsi_panic_threshold'),
-                    "Trail %": f"{params.get('trail_pct', 0)*100:.0f}%"
+                    "Target (TP)": f"{params.get('target', 0)*100:.1f}%",
+                    "Stop (SL)": f"{params.get('stop', 0)*100:.1f}%",
+                    "RSI Thresh": params.get('rsi_trend', 'N/A'),
+                    "ADX Thresh": params.get('adx_trend', 'N/A')
                 })
             st.table(pd.DataFrame(display_data))
         else:
-            st.warning("No strategies defined in YAML.")
-    else:
-        st.error(f"Config file not found at {yaml_path}. Check Docker mounts.")
+            st.warning("No strategies found in Database. Run the Tuner.")
+            if st.button("Run Tuner Now"):
+                st.info("Please run: docker exec algo_heart python src/tuner.py")
+    except Exception as e:
+        st.error(f"Error reading strategies from DB: {e}")
 
 with t3: # FULL MANUAL TICKET
     st.subheader("🕹️ Advanced Manual Ticket")

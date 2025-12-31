@@ -1,6 +1,13 @@
 // .dockerignore
 
 
+// .env
+APIKEY=<apikey>
+SECRETKEY=<secretkey>
+REPORT_LINK=<report_link>
+PAPER_URL=<paper_url>
+DB_PATH=<db_path>
+
 // .flake8
 [flake8]
 ignore = E501, E302, E305, E722, F401, W292, W291, W293, E701, E225
@@ -55,152 +62,7 @@ fine_tuner.*
 market_scanner.*
 
 // config/strategies.yaml
-system:
-  log_level: "INFO"
 
-strategies:
-  # ==========================================
-  # 🏆 THE MONSTERS (High Volatility Winners)
-  # ==========================================
-  
-  # CVNA: Deep Tune Winner (+666%)
-  # Strategy: "Raging Bull" - Buys shallow dips, uses wide 20% trail to survive volatility.
-  CVNA:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 7
-    rsi_panic_threshold: 50
-    ema_length: 20
-    trail_pct: 0.20
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # HOOD: Deep Tune Winner (+580%)
-  # Strategy: "Momentum Runner" - Needs a slow EMA 100 filter but buys aggressively.
-  HOOD:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 7
-    rsi_panic_threshold: 45
-    ema_length: 100
-    trail_pct: 0.20
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # PLTR: Initial Selection Winner (+447%)
-  # Strategy: "Aggressive Growth" - Beating the 'Deep Tune' by buying earlier (RSI 45 vs 30).
-  PLTR:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 7
-    rsi_panic_threshold: 45
-    ema_length: 50
-    trail_pct: 0.12
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # ==========================================
-  # 🏛️ THE FOUNDATION (Tech & Semis)
-  # ==========================================
-
-  # MU: Deep Tune Winner (+367%)
-  # Strategy: "Cyclical Swing" - Uses smoother RSI 14 to avoid chop.
-  MU:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 14
-    rsi_panic_threshold: 50
-    ema_length: 20
-    trail_pct: 0.12
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # NVDA: Initial Selection Winner (+366%)
-  # Strategy: "Trend Leader" - Needs EMA 35 and deep panic (<30) to enter safely.
-  NVDA:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 7
-    rsi_panic_threshold: 30
-    ema_length: 35
-    trail_pct: 0.12
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # TSLA: Deep Tune Winner (+364%)
-  # Strategy: "The Sniper" - Your original champion. Strict panic (<30) entry.
-  TSLA:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 7
-    rsi_panic_threshold: 30
-    ema_length: 35
-    trail_pct: 0.10
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # AVGO: Deep Tune Winner (+299%)
-  # Strategy: "Steady Climber" - Needs the widest trail (20%) to breathe.
-  AVGO:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 14
-    rsi_panic_threshold: 50
-    ema_length: 20
-    trail_pct: 0.20
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # ==========================================
-  # ⚡ LEVERAGE & GROWTH (High Risk/Reward)
-  # ==========================================
-
-  # TQQQ: Initial Selection Winner (+268%)
-  # Strategy: "Leverage King" - Fast EMA 20 to catch rapid market reversals.
-  TQQQ:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 7
-    rsi_panic_threshold: 45
-    ema_length: 20
-    trail_pct: 0.15
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # TSM: Deep Tune Winner (+218%)
-  # Strategy: "Value Fab" - Aggressive entry (RSI 50) on fast trend (EMA 20).
-  TSM:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 7
-    rsi_panic_threshold: 50
-    ema_length: 20
-    trail_pct: 0.12
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
-
-  # SHOP: Initial Selection Winner (+218%)
-  # Strategy: "Conservative Growth" - The 'Deep Tune' failed here (too strict).
-  # This version buys deep dips (RSI 30) but smooths them (RSI 14).
-  SHOP:
-    enabled: true
-    timeframe: "2h"
-    qty: 1
-    rsi_length: 14
-    rsi_panic_threshold: 30
-    ema_length: 20
-    trail_pct: 0.15
-    stop_loss_pct: 0.10
-    take_profit_pct: 0.50
 
 // docker-compose.yaml
 services:
@@ -210,7 +72,7 @@ services:
     volumes:
       - "${WORKSPACE}/data:/app/data"
       - "${WORKSPACE}/src:/app/src"
-      - "${WORKSPACE}/config:/app/config"
+      - "${WORKSPACE}/config:/app/config" # <--- ENSURE THIS IS HERE
     network_mode: "host"
     env_file: .env
 
@@ -220,6 +82,7 @@ services:
     volumes:
       - "${WORKSPACE}/data:/app/data"
       - "${WORKSPACE}/src:/app/src"
+      - "${WORKSPACE}/config:/app/config" # <--- ADD THIS TO THE UI SERVICE
     network_mode: "host"
     env_file: .env
     command: streamlit run src/dashboard.py --server.port=8501
@@ -265,7 +128,6 @@ pipeline {
         }
         stage('Checkout') {
             steps {
-                cleanWs()
                 checkout scm
             }
         }
@@ -280,15 +142,18 @@ pipeline {
         stage('Build & Deploy') {
             steps {
                 echo "📦 Building and Refreshing..."
-                // Passing environment variables to docker compose
-                sh """
-                    export DOCKER_IMAGE=${DOCKER_IMAGE}
-                    export WORKSPACE='${WORKSPACE}'
-                    docker compose up -d --build --remove-orphans
-                """
-                sh "docker compose restart dashboard trading-bot"
-                sh "sleep 5"
-                sh "docker exec algo_heart python src/tuner.py"
+                dir("${WORKSPACE}") {
+                    sh """
+                        export DOCKER_IMAGE=${DOCKER_IMAGE}
+                        export WORKSPACE='${WORKSPACE}'
+                        docker compose up -d --build --remove-orphans
+                    """
+                    // Changed 'dashboard' to 'dashboard' and 'trading-bot'
+                    // These must match the keys in your docker-compose.yaml
+                    sh "docker compose restart dashboard trading-bot"
+                    sh "sleep 5"
+                    sh "docker exec algo_heart python src/tuner.py"
+                }
             }
         }
     }
@@ -741,6 +606,33 @@ with t1: # ASSETS
                 c2.metric("P/L %", f"{float(p.unrealized_plpc or 0)*100:+.2f}%")
                 c3.metric("Value", f"${float(p.market_value):,.2f}")
     else: st.info("No active positions.")
+
+with t2: # ⚙️ STRATEGIES
+    st.subheader("Active Strategy Configurations")
+    yaml_path = "config/strategies.yaml"
+    
+    if os.path.exists(yaml_path):
+        with open(yaml_path, "r") as f:
+            config = yaml.safe_load(f)
+            strats = config.get('strategies', {})
+        
+        if strats:
+            # Create a clean dataframe for display
+            display_data = []
+            for ticker, params in strats.items():
+                display_data.append({
+                    "Ticker": ticker,
+                    "Enabled": "✅" if params.get('enabled') else "❌",
+                    "Timeframe": params.get('timeframe'),
+                    "Qty": params.get('qty'),
+                    "RSI Panic": params.get('rsi_panic_threshold'),
+                    "Trail %": f"{params.get('trail_pct', 0)*100:.0f}%"
+                })
+            st.table(pd.DataFrame(display_data))
+        else:
+            st.warning("No strategies defined in YAML.")
+    else:
+        st.error(f"Config file not found at {yaml_path}. Check Docker mounts.")
 
 with t3: # FULL MANUAL TICKET
     st.subheader("🕹️ Advanced Manual Ticket")

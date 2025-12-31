@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, 
-    StopLossRequest, GetPortfolioHistoryRequest
+    StopLossRequest, GetPortfolioHistoryRequest, GetOrdersRequest
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
 from src.config import Config
@@ -87,6 +87,13 @@ class Broker:
     def is_holding(self, symbol):
         try: return self.client.get_open_position(symbol)
         except: return None
+
+    def get_orders_for_symbol(self, symbol):
+        """Fetches open orders (Limit, Stop, etc) for a specific ticker."""
+        try:
+            req = GetOrdersRequest(status=OrderStatus.OPEN, symbols=[symbol])
+            return self.client.get_orders(req)
+        except: return []
 
     def submit_order_v2(self, order_type, **kwargs):
         """Expanded submitter to handle advanced order types from UI."""
