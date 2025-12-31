@@ -140,14 +140,12 @@ with t1: # ASSETS (COMPACT VIEW)
                     # Calculate Distance %
                     dist_str = ""
                     if trigger_val > 0 and curr_price > 0:
-                        # FLIPPED SIGN as requested: -1 * (Trigger - Current) / Current
+                        # FLIPPED SIGN logic: -1 * (Trigger - Current) / Current
                         dist = -1 * ((trigger_val - curr_price) / curr_price) * 100
                         # Format: (+5.2%) or (-2.1%)
                         dist_str = f" <span style='color:{'#28a745' if dist>0 else '#dc3545'}'>({dist:+.1f}%)</span>"
                     
-                    # Determine Label (SL/TP guess based on price vs current)
-                    # If Sell Order > Current Price -> Likely TP
-                    # If Sell Order < Current Price -> Likely SL
+                    # Determine Label
                     lbl = o.order_type.upper()
                     if o.side == 'sell':
                         if trigger_val > curr_price: lbl = "🎯 TP" # Target
@@ -164,14 +162,16 @@ with t1: # ASSETS (COMPACT VIEW)
             orders_html = "".join(order_html_list)
 
             # 4. Render Card
-            # We use st.container with a custom class/border approach for density
             with st.container(border=True):
                 # Header Row
                 c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.2])
                 c1.markdown(f"### {color_bar} {symbol}")
                 c2.metric("Qty", f"{qty:.1f}")
                 c3.metric("Price", f"${curr_price:.2f}")
-                c4.metric("P/L", f"${pl_val:.2f}", f"{pl_pct:+.2f}%")
+                
+                # UPDATED P/L METRIC: Primary is %, Secondary is $
+                c4.metric("P/L", f"{pl_pct:+.2f}%", f"${pl_val:+.2f}")
+                
                 c5.metric("Value", f"${mkt_val:,.0f}")
                 
                 # Order Row (Custom HTML)
