@@ -29,6 +29,7 @@ pipeline {
                 echo "📦 Building and Refreshing..."
                 dir("${WORKSPACE}") {
                     sh """
+                        mkdir -p data config logs
                         export DOCKER_IMAGE=${DOCKER_IMAGE}
                         export WORKSPACE='${WORKSPACE}'
                         docker compose up -d --build --remove-orphans
