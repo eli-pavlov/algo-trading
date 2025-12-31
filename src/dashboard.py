@@ -12,10 +12,52 @@ st.set_page_config(page_title="Algo Command Center", layout="wide")
 # --- COMPRESSED CSS ---
 st.markdown("""
 <style>
-    [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
+    /* Compact main container */
     .stMainBlockContainer { padding-top: 1rem !important; padding-bottom: 1rem !important; }
-    .stMetric { padding: 0.1rem !important; }
-    [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
+    
+    /* Reduce vertical gaps between elements */
+    [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
+    
+    /* Compact Metrics */
+    .stMetric { padding: 2px !important; }
+    [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
+    
+    /* Asset Card Styling */
+    .asset-card {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .dark-mode .asset-card {
+        background-color: #262730;
+        border: 1px solid #41444e;
+    }
+    
+    /* Order Chip Styling */
+    .order-chip {
+        display: inline-block;
+        font-family: monospace;
+        font-size: 0.85rem;
+        background-color: #f0f2f6;
+        color: #31333F;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-right: 8px;
+        margin-top: 4px;
+        border: 1px solid #d0d0d0;
+    }
+    .dark-mode .order-chip {
+        background-color: #363945;
+        color: #FAFAFA;
+        border: 1px solid #555;
+    }
+    .order-label { font-weight: bold; color: #555; }
+    
+    /* Debug Box */
     .debug-card { background: #f0f2f6; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 5px;}
 </style>
 """, unsafe_allow_html=True)
@@ -39,7 +81,9 @@ with st.sidebar:
             from alpaca.trading.requests import GetPortfolioHistoryRequest
             hist = broker.client.get_portfolio_history(GetPortfolioHistoryRequest(period="1D", timeframe="15Min"))
             if hist and hist.equity:
-                st.area_chart(pd.DataFrame({"Equity": hist.equity}), height=100, color="#29b5e8")
+                # Basic error handling for None values in history
+                clean_equity = [x if x is not None else 0 for x in hist.equity]
+                st.area_chart(pd.DataFrame({"Equity": clean_equity}), height=100, color="#29b5e8")
         except: st.caption("Graph unavailable")
         
         # Historic Stats
@@ -63,54 +107,85 @@ if broker: st.info(f"**{broker.get_market_clock()}**")
 # --- TABS ---
 t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution", "🔍 Debug"])
 
-with t1: # ASSETS
+with t1: # ASSETS (COMPACT VIEW)
     positions = broker.get_all_positions()
     if positions:
+        # Sort by Market Value descending
+        positions.sort(key=lambda x: float(x.market_value), reverse=True)
+        
         for p in positions:
-            # Fetch open orders for this symbol
-            open_orders = broker.get_orders_for_symbol(p.symbol)
-            
-            # Create a summary string for the expander header
+            # 1. Gather Data
+            symbol = p.symbol
+            qty = float(p.qty)
+            curr_price = float(p.current_price)
+            avg_price = float(p.avg_entry_price)
             pl_val = float(p.unrealized_pl)
-            pl_emoji = "🟢" if pl_val >= 0 else "🔴"
+            pl_pct = float(p.unrealized_plpc) * 100
+            mkt_val = float(p.market_value)
             
-            with st.expander(f"{pl_emoji} {p.symbol} | {float(p.qty):.1f} sh | P/L: ${pl_val:.2f}"):
-                # 1. Position Stats
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Price", f"${float(p.current_price):.2f}")
-                c2.metric("P/L %", f"{float(p.unrealized_plpc or 0)*100:+.2f}%")
-                c3.metric("Value", f"${float(p.market_value):,.2f}")
+            # 2. Status Color
+            color_bar = "🟢" if pl_val >= 0 else "🔴"
+            
+            # 3. Fetch & Format Orders
+            open_orders = broker.get_orders_for_symbol(symbol)
+            order_html_list = []
+            
+            if open_orders:
+                for o in open_orders:
+                    # Determine Trigger Price
+                    # Order might be Limit, Stop, or StopLimit
+                    trigger = o.limit_price or o.stop_price
+                    trigger_val = float(trigger) if trigger else 0.0
+                    
+                    # Calculate Distance %
+                    dist_str = ""
+                    if trigger_val > 0 and curr_price > 0:
+                        dist = ((trigger_val - curr_price) / curr_price) * 100
+                        # Format: (+5.2%) or (-2.1%)
+                        dist_str = f" <span style='color:{'#28a745' if dist>0 else '#dc3545'}'>({dist:+.1f}%)</span>"
+                    
+                    # Determine Label (SL/TP guess based on price vs current)
+                    # If Sell Order > Current Price -> Likely TP
+                    # If Sell Order < Current Price -> Likely SL
+                    lbl = o.order_type.upper()
+                    if o.side == 'sell':
+                        if trigger_val > curr_price: lbl = "🎯 TP" # Target
+                        elif trigger_val < curr_price: lbl = "🛑 SL" # Stop
+                    
+                    price_display = f"${trigger_val:.2f}" if trigger_val > 0 else "MKT"
+                    
+                    # Create HTML Chip
+                    chip = f"<span class='order-chip'><b>{lbl}</b>: {price_display}{dist_str}</span>"
+                    order_html_list.append(chip)
+            else:
+                order_html_list.append("<span style='color:#888; font-style:italic; font-size:0.8rem;'>No pending orders</span>")
+
+            orders_html = "".join(order_html_list)
+
+            # 4. Render Card
+            # We use st.container with a custom class/border approach for density
+            with st.container(border=True):
+                # Header Row
+                c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.2])
+                c1.markdown(f"### {color_bar} {symbol}")
+                c2.metric("Qty", f"{qty:.1f}")
+                c3.metric("Price", f"${curr_price:.2f}")
+                c4.metric("P/L", f"${pl_val:.2f}", f"{pl_pct:+.2f}%")
+                c5.metric("Value", f"${mkt_val:,.0f}")
                 
-                # 2. Pending Orders (Stop Loss / Take Profit)
-                if open_orders:
-                    st.divider()
-                    st.caption("🛑 Pending Orders (TP / SL)")
-                    order_data = []
-                    for o in open_orders:
-                        # Determine order type and price
-                        o_type = o.order_type.upper()
-                        # Some orders have limit, some stop, some neither
-                        price = o.limit_price or o.stop_price or "MKT"
-                        
-                        order_data.append({
-                            "Type": f"{o.side.upper()} {o_type}",
-                            "Qty": o.qty,
-                            "Trigger Price": f"${float(price):.2f}" if price != "MKT" else "MKT",
-                            "Status": o.status.upper()
-                        })
-                    st.dataframe(pd.DataFrame(order_data), use_container_width=True, hide_index=True)
-                else:
-                    st.caption("No pending orders.")
+                # Order Row (Custom HTML)
+                st.markdown(f"""
+                <div style="margin-top: -10px; margin-bottom: 5px;">
+                    {orders_html}
+                </div>
+                """, unsafe_allow_html=True)
 
     else: st.info("No active positions.")
 
 with t2: # ⚙️ STRATEGIES
     st.subheader("Active Strategy Configurations (Database)")
-    
-    # Read from Database instead of YAML
     try:
         strategies = get_strategies() # From src.database
-        
         if strategies:
             display_data = []
             for ticker, params in strategies.items():
@@ -121,7 +196,7 @@ with t2: # ⚙️ STRATEGIES
                     "RSI Thresh": params.get('rsi_trend', 'N/A'),
                     "ADX Thresh": params.get('adx_trend', 'N/A')
                 })
-            st.table(pd.DataFrame(display_data))
+            st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
         else:
             st.warning("No strategies found in Database. Run the Tuner.")
             if st.button("Run Tuner Now"):
