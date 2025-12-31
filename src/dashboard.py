@@ -140,7 +140,8 @@ with t1: # ASSETS (COMPACT VIEW)
                     # Calculate Distance %
                     dist_str = ""
                     if trigger_val > 0 and curr_price > 0:
-                        dist = ((trigger_val - curr_price) / curr_price) * 100
+                        # FLIPPED SIGN as requested: -1 * (Trigger - Current) / Current
+                        dist = -1 * ((trigger_val - curr_price) / curr_price) * 100
                         # Format: (+5.2%) or (-2.1%)
                         dist_str = f" <span style='color:{'#28a745' if dist>0 else '#dc3545'}'>({dist:+.1f}%)</span>"
                     
