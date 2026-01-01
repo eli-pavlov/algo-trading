@@ -12,47 +12,42 @@ from src.notifications import send_trade_notification
 
 # --- ASYNC TUNER LOGIC ---
 def _run_tuner_job():
-    print("🧠 Starting Scheduled Weekly Tuning...")
+    print("🧠 Starting Scheduled Weekly Tuning (Background Thread)...")
     try:
+        # 🟢 LAZY IMPORT: Prevents Circular Import Crash at Startup
         from src.tuner import optimize_stock, TICKERS
+        
         broker_tuner = Broker()
         for t in TICKERS:
             optimize_stock(t, broker_tuner)
-        print("✅ Weekly Tuning Complete.")
+        print("✅ Weekly Tuning Complete. New strategies saved to DB.")
     except Exception as e:
-        print(f"❌ Tuning Error: {e}")
+        print(f"❌ Tuning Thread Error: {e}")
 
 def schedule_async_tuner():
+    """Spawns the tuner thread so the main loop doesn't freeze."""
+    print("⏳ Triggering Async Tuner...")
     t = threading.Thread(target=_run_tuner_job)
     t.start()
 
-# --- NEW: SYNC LOGIC ---
+# --- SYNC LOGIC ---
 def sync_order_statuses(broker):
     """Checks Alpaca for updates on orders we think are still 'NEW'."""
     try:
-        pending = get_unfilled_executions() # Returns list of (order_id,)
+        pending = get_unfilled_executions()
         if not pending: return
 
         for (oid,) in pending:
             try:
-                # Ask Alpaca for the latest status
                 alpaca_order = broker.client.get_order_by_id(oid)
-                
                 if alpaca_order.status == 'filled':
-                    # It filled! Update DB.
                     update_trade_fill(oid, float(alpaca_order.filled_avg_price), alpaca_order.filled_at, 'FILLED')
                     print(f"🔄 Synced Fill: {oid}")
-                    
                 elif alpaca_order.status in ['canceled', 'expired', 'rejected']:
-                    # It died. Update DB.
                     update_trade_fill(oid, 0.0, str(datetime.utcnow()), alpaca_order.status.upper())
                     print(f"🔄 Synced Cancel: {oid}")
-                    
-            except Exception as e:
-                # Order might not exist in Alpaca or network error
-                pass
-    except Exception as e:
-        print(f"Sync Error: {e}")
+            except: pass
+    except Exception as e: print(f"Sync Error: {e}")
 
 # --- TRADING LOGIC ---
 def process_manual_queue(broker):
@@ -73,10 +68,7 @@ def heart_beat():
     update_status("api_health", msg)
     if not ok: return
 
-    # 1. Sync Statuses (Fixes the "Execution" tab not updating)
     sync_order_statuses(broker)
-
-    # 2. Process Manual Queue
     process_manual_queue(broker)
 
     if get_status("engine_running") == "0": return
@@ -102,35 +94,22 @@ def heart_beat():
             df_2h = df.resample('2h', origin='start_day').apply(logic).dropna()
             if len(df_2h) < 14: continue 
 
-            close_series = df_2h['Close']
-            high_series = df_2h['High']
-            low_series = df_2h['Low']
-            
-            confirmed_rsi = RSIIndicator(close_series).rsi().iloc[-2]
-            confirmed_adx = ADXIndicator(high_series, low_series, close_series).adx().iloc[-2]
+            confirmed_rsi = RSIIndicator(df_2h['Close']).rsi().iloc[-2]
+            confirmed_adx = ADXIndicator(df_2h['High'], df_2h['Low'], df_2h['Close']).adx().iloc[-2]
         except: continue
 
         pos = broker.is_holding(sym)
-
         if not pos:
             if confirmed_adx > p.get('adx_trend', 25) and confirmed_rsi > p.get('rsi_trend', 50):
-                price = broker.get_latest_price(sym) # Note: Broker needs get_latest_price method or use current_price from position check
-                # Fallback if get_latest_price missing in broker snippet provided:
-                # price = close_series.iloc[-1] 
-                # Ideally, add get_latest_price to broker.py
-                
-                # Assuming broker has functionality or we use last close
+                price = broker.get_latest_price(sym)
                 if price and cash > price:
                     qty = int(min(cash, target_per_stock) / price)
                     if qty >= 1:
-                        tp_price = round(price * (1 + p['target']), 2)
-                        sl_price = round(price * (1 - p['stop']), 2)
-                        
-                        success, order_id = broker.submit_order_v2(
-                            "market", symbol=sym, qty=qty, side="buy", 
-                            take_profit={"limit_price": tp_price}, 
-                            stop_loss={"stop_price": sl_price}
-                        )
+                        tp = round(price * (1 + p['target']), 2)
+                        sl = round(price * (1 - p['stop']), 2)
+                        success, _ = broker.submit_order_v2("market", symbol=sym, qty=qty, side="buy", 
+                                                          take_profit={"limit_price": tp}, 
+                                                          stop_loss={"stop_price": sl})
                         if success:
                             send_trade_notification()
                             cash -= (qty * price) 
@@ -141,7 +120,7 @@ def heart_beat():
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trader Starting...")
+    print("🚀 Algo-Trader (2H Strategy + Async Tuner) Starting...")
     schedule.every(1).minutes.do(heart_beat)
     schedule.every().friday.at("23:00").do(schedule_async_tuner)
     while True:
