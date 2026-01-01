@@ -51,27 +51,52 @@ def heart_beat():
     target_per_stock = equity / len(strategies)
 
     for sym, p in strategies.items():
-        # A. Get Data
-        df = yf.download(sym, period="5d", interval="1h", progress=False)
-        if df.empty: continue
+        # A. Get Data (1H Interval)
+        df = yf.download(sym, period="10d", interval="1h", progress=False)
+        if df.empty or len(df) < 10: continue
         
-        # B. Calc Indicators
-        # (Assuming simple close series)
-        close = df['Close']
-        if isinstance(close, pd.DataFrame): close = close.iloc[:,0]
-        
+        # B. Clean & Resample to 2H (Match Tuner)
+        # We need to replicate the Tuner's view of the world
         try:
-            rsi = RSIIndicator(close).rsi().iloc[-1]
-            adx = ADXIndicator(df['High'], df['Low'], close).adx().iloc[-1]
-        except: continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-        # C. Check Positions
+            # Resample logic
+            logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+            df_2h = df.resample('2h', origin='start_day').apply(logic).dropna()
+            
+            if len(df_2h) < 14: continue # Not enough data for RSI 14
+
+            # C. Calc Indicators on 2H Data
+            # Note: We take iloc[-1] (Developing) or iloc[-2] (Confirmed)?
+            # To conform to backtest "Close" logic, we usually look at the last *completed* candle.
+            # However, in live trading, waiting 2 hours might be too laggy. 
+            # We will calculate on the current set, but strictly using 2H math.
+            
+            close_series = df_2h['Close']
+            high_series = df_2h['High']
+            low_series = df_2h['Low']
+            
+            current_rsi = RSIIndicator(close_series).rsi().iloc[-1]
+            current_adx = ADXIndicator(high_series, low_series, close_series).adx().iloc[-1]
+            
+            # Use previous candle for signal stability if desired, 
+            # but usually live bots act on 'current' developing status if aligned.
+            # Let's align with Tuner which used 'shifted' data (Confirmed Close).
+            confirmed_rsi = RSIIndicator(close_series).rsi().iloc[-2]
+            confirmed_adx = ADXIndicator(high_series, low_series, close_series).adx().iloc[-2]
+
+        except Exception as e:
+            print(f"Calc Error {sym}: {e}")
+            continue
+
+        # D. Check Positions
         pos = broker.is_holding(sym)
 
-        # D. Logic
+        # E. Execution Logic (Using Confirmed 2H Signals)
         if not pos:
-            # ENTRY
-            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
+            # ENTRY (Checks strictly against Tuned parameters)
+            if confirmed_adx > p.get('adx_trend', 25) and confirmed_rsi > p.get('rsi_trend', 50):
                 price = broker.get_latest_price(sym)
                 if price > 0 and cash > price:
                     qty = int(min(cash, target_per_stock) / price)
@@ -81,20 +106,21 @@ def heart_beat():
                         sl_price = round(price * (1 - p['stop']), 2)
                         
                         # EXECUTE BRACKET
-                        if broker.buy_bracket(sym, qty, tp_price, sl_price):
+                        if broker.submit_order_v2("market", symbol=sym, qty=qty, side="buy", 
+                                                take_profit={"limit_price": tp_price}, 
+                                                stop_loss={"stop_price": sl_price}):
                             send_trade_notification()
                             cash -= (qty * price) # Adjust local cash estimate
         else:
             # EXIT (Panic / Strategy Exit)
-            # Note: The Bracket order handles TP/SL automatically!
-            # We only need to force sell if RSI indicates a crash not caught by SL
-            if rsi < 40:
+            # If 2H RSI drops below 40 (Tuner logic), close it.
+            if confirmed_rsi < 40:
                 broker.close_position(sym)
                 send_trade_notification()
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trader (Alpaca-Py Edition) Starting...")
+    print("🚀 Algo-Trader (2H Strategy Engine) Starting...")
     schedule.every(1).minutes.do(heart_beat)
     while True:
         schedule.run_pending()

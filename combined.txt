@@ -144,6 +144,7 @@ pipeline {
                 echo "📦 Building and Refreshing..."
                 dir("${WORKSPACE}") {
                     sh """
+                        mkdir -p data config logs
                         export DOCKER_IMAGE=${DOCKER_IMAGE}
                         export WORKSPACE='${WORKSPACE}'
                         docker compose up -d --build --remove-orphans
@@ -402,9 +403,9 @@ from datetime import datetime, timezone, timedelta
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, 
-    StopLossRequest, GetPortfolioHistoryRequest
+    StopLossRequest, GetPortfolioHistoryRequest, GetOrdersRequest
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, OrderStatus, QueryOrderStatus
 from src.config import Config
 from src.database import log_trade_attempt, update_trade_fill, DB_PATH
 
@@ -484,6 +485,32 @@ class Broker:
         try: return self.client.get_open_position(symbol)
         except: return None
 
+    def get_orders_for_symbol(self, symbol):
+        """Fetches active orders (Limit, Stop, etc) for a specific ticker."""
+        try:
+            # FIX: Use QueryOrderStatus.ALL to catch 'HELD' and 'NEW' orders
+            # Alpaca defaults to 'OPEN' which hides bracket legs until triggered
+            req = GetOrdersRequest(status=QueryOrderStatus.ALL, symbols=[symbol], limit=50)
+            all_orders = self.client.get_orders(req)
+            
+            # Filter out dead orders manually
+            active_orders = []
+            terminal_states = [
+                OrderStatus.FILLED, 
+                OrderStatus.CANCELED, 
+                OrderStatus.EXPIRED, 
+                OrderStatus.REJECTED
+            ]
+            
+            for o in all_orders:
+                if o.status not in terminal_states:
+                    active_orders.append(o)
+                    
+            return active_orders
+        except Exception as e: 
+            print(f"Order fetch error: {e}")
+            return []
+
     def submit_order_v2(self, order_type, **kwargs):
         """Expanded submitter to handle advanced order types from UI."""
         try:
@@ -538,18 +565,72 @@ import os, socket, platform, json, time, psutil
 from datetime import datetime, timezone
 from src.broker import Broker
 from src.config import Config
-from src.database import get_status, update_status, delete_strategy, DB_PATH
+from src.database import get_status, update_status, delete_strategy, get_strategies, DB_PATH
 
 st.set_page_config(page_title="Algo Command Center", layout="wide")
 
 # --- COMPRESSED CSS ---
 st.markdown("""
 <style>
-    [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
+    /* Compact main container */
     .stMainBlockContainer { padding-top: 1rem !important; padding-bottom: 1rem !important; }
-    .stMetric { padding: 0.1rem !important; }
-    [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
+    
+    /* Reduce vertical gaps between elements */
+    [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
+    
+    /* Compact Metrics */
+    .stMetric { padding: 2px !important; }
+    [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
+    
+    /* Asset Card Styling */
+    .asset-card {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .dark-mode .asset-card {
+        background-color: #262730;
+        border: 1px solid #41444e;
+    }
+    
+    /* Order Chip Styling */
+    .order-chip {
+        display: inline-block;
+        font-family: monospace;
+        font-size: 0.85rem;
+        background-color: #f0f2f6;
+        color: #31333F;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-right: 8px;
+        margin-top: 4px;
+        border: 1px solid #d0d0d0;
+    }
+    .dark-mode .order-chip {
+        background-color: #363945;
+        color: #FAFAFA;
+        border: 1px solid #555;
+    }
+    .order-label { font-weight: bold; color: #555; }
+    
+    /* Debug Box */
     .debug-card { background: #f0f2f6; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 5px;}
+    
+    /* Logo Styling */
+    .ticker-logo {
+        width: 32px;
+        height: 32px;
+        vertical-align: middle;
+        margin-right: 10px;
+        border-radius: 50%;
+        background-color: #fff; /* Ensure transparent logos look okay */
+        padding: 2px;
+        border: 1px solid #eee;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -572,7 +653,8 @@ with st.sidebar:
             from alpaca.trading.requests import GetPortfolioHistoryRequest
             hist = broker.client.get_portfolio_history(GetPortfolioHistoryRequest(period="1D", timeframe="15Min"))
             if hist and hist.equity:
-                st.area_chart(pd.DataFrame({"Equity": hist.equity}), height=100, color="#29b5e8")
+                clean_equity = [x if x is not None else 0 for x in hist.equity]
+                st.area_chart(pd.DataFrame({"Equity": clean_equity}), height=100, color="#29b5e8")
         except: st.caption("Graph unavailable")
         
         # Historic Stats
@@ -596,43 +678,108 @@ if broker: st.info(f"**{broker.get_market_clock()}**")
 # --- TABS ---
 t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution", "🔍 Debug"])
 
-with t1: # ASSETS
+with t1: # ASSETS (COMPACT VIEW)
     positions = broker.get_all_positions()
     if positions:
+        # Sort by Market Value descending
+        positions.sort(key=lambda x: float(x.market_value), reverse=True)
+        
         for p in positions:
-            with st.expander(f"{p.symbol} | {float(p.qty):.1f} sh | P/L: ${float(p.unrealized_pl):.2f}"):
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Price", f"${float(p.current_price):.2f}")
-                c2.metric("P/L %", f"{float(p.unrealized_plpc or 0)*100:+.2f}%")
-                c3.metric("Value", f"${float(p.market_value):,.2f}")
+            # 1. Gather Data
+            symbol = p.symbol
+            qty = float(p.qty)
+            curr_price = float(p.current_price)
+            pl_val = float(p.unrealized_pl)
+            pl_pct = float(p.unrealized_plpc) * 100
+            mkt_val = float(p.market_value)
+            
+            # 2. Fetch & Format Orders
+            open_orders = broker.get_orders_for_symbol(symbol)
+            order_html_list = []
+            
+            if open_orders:
+                for o in open_orders:
+                    # Determine Trigger Price
+                    trigger = o.limit_price or o.stop_price
+                    trigger_val = float(trigger) if trigger else 0.0
+                    
+                    # Calculate Distance %
+                    dist_str = ""
+                    if trigger_val > 0 and curr_price > 0:
+                        dist = -1 * ((trigger_val - curr_price) / curr_price) * 100
+                        dist_str = f" <span style='color:{'#28a745' if dist>0 else '#dc3545'}'>({dist:+.1f}%)</span>"
+                    
+                    # Determine Label
+                    lbl = o.order_type.upper()
+                    if o.side == 'sell':
+                        if trigger_val > curr_price: lbl = "🎯 TP" 
+                        elif trigger_val < curr_price: lbl = "🛑 SL" 
+                    
+                    price_display = f"${trigger_val:.2f}" if trigger_val > 0 else "MKT"
+                    
+                    # Create HTML Chip
+                    chip = f"<span class='order-chip'><b>{lbl}</b>: {price_display}{dist_str}</span>"
+                    order_html_list.append(chip)
+            else:
+                order_html_list.append("<span style='color:#888; font-style:italic; font-size:0.8rem;'>No pending orders</span>")
+
+            orders_html = "".join(order_html_list)
+
+            # 3. Dynamic Logo URL (TradingView Source)
+            logo_url = f"https://s3-symbol-logo.tradingview.com/{symbol.lower()}.svg"
+            
+            # 4. Render Card
+            with st.container(border=True):
+                # Header Row
+                c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.2])
+                
+                # REPLACED CIRCLE WITH LOGO IMG
+                c1.markdown(f"""
+                    <div style="display:flex; align-items:center;">
+                        <img src="{logo_url}" class="ticker-logo" onerror="this.style.display='none'">
+                        <h3 style="margin:0; padding:0;">{symbol}</h3>
+                    </div>
+                """, unsafe_allow_html=True)
+                
+                c2.metric("Qty", f"{qty:.1f}")
+                c3.metric("Price", f"${curr_price:.2f}")
+                
+                # P/L METRIC (Explicit Sign for Delta)
+                delta_str = f"{'+' if pl_val >= 0 else '-'}${abs(pl_val):.2f}"
+                c4.metric("P/L", f"{pl_pct:+.2f}%", delta_str)
+                
+                c5.metric("Value", f"${mkt_val:,.0f}")
+                
+                # Order Row
+                st.markdown(f"""
+                <div style="margin-top: -10px; margin-bottom: 5px;">
+                    {orders_html}
+                </div>
+                """, unsafe_allow_html=True)
+
     else: st.info("No active positions.")
 
 with t2: # ⚙️ STRATEGIES
-    st.subheader("Active Strategy Configurations")
-    yaml_path = "config/strategies.yaml"
-    
-    if os.path.exists(yaml_path):
-        with open(yaml_path, "r") as f:
-            config = yaml.safe_load(f)
-            strats = config.get('strategies', {})
-        
-        if strats:
-            # Create a clean dataframe for display
+    st.subheader("Active Strategy Configurations (Database)")
+    try:
+        strategies = get_strategies() # From src.database
+        if strategies:
             display_data = []
-            for ticker, params in strats.items():
+            for ticker, params in strategies.items():
                 display_data.append({
                     "Ticker": ticker,
-                    "Enabled": "✅" if params.get('enabled') else "❌",
-                    "Timeframe": params.get('timeframe'),
-                    "Qty": params.get('qty'),
-                    "RSI Panic": params.get('rsi_panic_threshold'),
-                    "Trail %": f"{params.get('trail_pct', 0)*100:.0f}%"
+                    "Target (TP)": f"{params.get('target', 0)*100:.1f}%",
+                    "Stop (SL)": f"{params.get('stop', 0)*100:.1f}%",
+                    "RSI Thresh": params.get('rsi_trend', 'N/A'),
+                    "ADX Thresh": params.get('adx_trend', 'N/A')
                 })
-            st.table(pd.DataFrame(display_data))
+            st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
         else:
-            st.warning("No strategies defined in YAML.")
-    else:
-        st.error(f"Config file not found at {yaml_path}. Check Docker mounts.")
+            st.warning("No strategies found in Database. Run the Tuner.")
+            if st.button("Run Tuner Now"):
+                st.info("Please run: docker exec algo_heart python src/tuner.py")
+    except Exception as e:
+        st.error(f"Error reading strategies from DB: {e}")
 
 with t3: # FULL MANUAL TICKET
     st.subheader("🕹️ Advanced Manual Ticket")
@@ -898,12 +1045,24 @@ if __name__ == "__main__":
 
 // src/notifications.py
 from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetOrdersRequest
+from alpaca.trading.enums import QueryOrderStatus
 from src.config import Config
 import requests
 import datetime
 
+def _fmt_money_compact(val):
+    """Shortens large numbers: 1200 -> 1.2K, 1500000 -> 1.5M"""
+    abs_val = abs(val)
+    if abs_val >= 1_000_000:
+        return f"${val/1_000_000:.1f}M"
+    elif abs_val >= 1_000:
+        return f"${val/1_000:.1f}K"
+    else:
+        return f"${val:.2f}"
+
 def send_trade_notification():
-    """Compiles and sends the Slack report"""
+    """Compiles and sends the Slack report with compact formatting."""
     if not Config.REPORT_URL: return
     
     # Auth for the reporter
@@ -912,20 +1071,62 @@ def send_trade_notification():
         client = TradingClient(key, secret, paper=is_paper)
         acc = client.get_account()
         
-        # Build Message
+        # Build Header
         msg = f"✅ **Trade Executed** ({Config.MODE})\n"
         msg += f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        msg += f"Equity: ${float(acc.portfolio_value):.2f}\n"
-        msg += f"Cash: ${float(acc.cash):.2f}\n"
         
-        # Positions
+        # Compact Financials
+        eq_str = _fmt_money_compact(float(acc.portfolio_value))
+        cash_str = _fmt_money_compact(float(acc.cash))
+        msg += f"Equity: {eq_str} | Cash: {cash_str}\n"
+        
+        # Positions Data
         positions = client.get_all_positions()
+        
         if positions:
+            # Fetch Open Orders for Dist% Context
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
+            orders = client.get_orders(req)
+            
+            # Map Orders
+            orders_map = {}
+            for o in orders:
+                if o.symbol not in orders_map: orders_map[o.symbol] = []
+                orders_map[o.symbol].append(o)
+
             msg += "\n**Positions:**\n"
             msg += "```\n"
+            
             for p in positions:
+                # 1. Basic Stats
+                symbol = p.symbol
+                mkt_val = float(p.market_value)
                 pl_pct = float(p.unrealized_plpc) * 100
-                msg += f"{p.symbol:<6} ${float(p.market_value):<8.2f} P/L: {pl_pct:+.2f}%\n"
+                
+                # 2. Calculate Distance (Delta)
+                dist_str = ""
+                if symbol in orders_map:
+                    current_price = float(p.current_price)
+                    trigger_price = 0.0
+                    
+                    # Priority: Limit (TP) -> Stop (SL)
+                    limit_orders = [o for o in orders_map[symbol] if o.limit_price]
+                    if limit_orders:
+                        trigger_price = float(limit_orders[0].limit_price)
+                    else:
+                        stop_orders = [o for o in orders_map[symbol] if o.stop_price]
+                        if stop_orders:
+                            trigger_price = float(stop_orders[0].stop_price)
+                    
+                    if trigger_price > 0 and current_price > 0:
+                        dist = ((trigger_price - current_price) / current_price) * 100
+                        dist_str = f" ∆{dist:+.0f}%"
+
+                # 3. Format Line: "AMD   $2.3K   p/l:+1.5% ∆+5%"
+                val_fmt = _fmt_money_compact(mkt_val)
+                line = f"{symbol:<5} {val_fmt:<7} p/l:{pl_pct:+.1f}%{dist_str}\n"
+                msg += line
+                
             msg += "```"
             
         requests.post(Config.REPORT_URL, json={"text": msg})
