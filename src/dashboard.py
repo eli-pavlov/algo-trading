@@ -1,83 +1,40 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import os, socket, platform, json, time, psutil
-from datetime import datetime, timezone
+import time
+import psutil
+from datetime import datetime
 from src.broker import Broker
 from src.config import Config
-from src.database import get_status, update_status, delete_strategy, get_strategies, DB_PATH
+from src.database import get_status, update_status, get_strategies, DB_PATH
+# 1️⃣ NEW IMPORT: Bring in the notification logic
+from src.notifications import send_trade_notification 
 
 st.set_page_config(page_title="Algo Command Center", layout="wide")
 
 # --- COMPRESSED CSS ---
 st.markdown("""
 <style>
-    /* Compact main container */
     .stMainBlockContainer { padding-top: 1rem !important; padding-bottom: 1rem !important; }
-    
-    /* Reduce vertical gaps between elements */
     [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
-    
-    /* Compact Metrics */
     .stMetric { padding: 2px !important; }
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
     [data-testid="stMetricLabel"] { font-size: 0.8rem !important; }
-    
-    /* Asset Card Styling */
-    .asset-card {
-        background-color: #ffffff;
-        border: 1px solid #e0e0e0;
-        border-radius: 8px;
-        padding: 10px;
-        margin-bottom: 8px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    .dark-mode .asset-card {
-        background-color: #262730;
-        border: 1px solid #41444e;
-    }
-    
-    /* Order Chip Styling */
-    .order-chip {
-        display: inline-block;
-        font-family: monospace;
-        font-size: 0.85rem;
-        background-color: #f0f2f6;
-        color: #31333F;
-        padding: 2px 8px;
-        border-radius: 4px;
-        margin-right: 8px;
-        margin-top: 4px;
-        border: 1px solid #d0d0d0;
-    }
-    .dark-mode .order-chip {
-        background-color: #363945;
-        color: #FAFAFA;
-        border: 1px solid #555;
-    }
+    .asset-card { background-color: #ffffff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .dark-mode .asset-card { background-color: #262730; border: 1px solid #41444e; }
+    .order-chip { display: inline-block; font-family: monospace; font-size: 0.85rem; background-color: #f0f2f6; color: #31333F; padding: 2px 8px; border-radius: 4px; margin-right: 8px; margin-top: 4px; border: 1px solid #d0d0d0; }
+    .dark-mode .order-chip { background-color: #363945; color: #FAFAFA; border: 1px solid #555; }
     .order-label { font-weight: bold; color: #555; }
-    
-    /* Debug Box */
     .debug-card { background: #f0f2f6; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 5px;}
-    
-    /* Logo Styling */
-    .ticker-logo {
-        width: 32px;
-        height: 32px;
-        vertical-align: middle;
-        margin-right: 10px;
-        border-radius: 50%;
-        background-color: #fff; /* Ensure transparent logos look okay */
-        padding: 2px;
-        border: 1px solid #eee;
-    }
+    .ticker-logo { width: 32px; height: 32px; vertical-align: middle; margin-right: 10px; border-radius: 50%; background-color: #fff; padding: 2px; border: 1px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
 
+# Initialize Broker
 broker = Broker()
 conn_ok, conn_msg = broker.test_connection()
 
-# --- SIDEBAR: Portfolio & Stats ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.markdown(f"**MODE: {Config.MODE}**")
     if conn_ok:
@@ -86,7 +43,6 @@ with st.sidebar:
         st.metric("Equity", f"${acc.get('Equity', 0):,.0f}")
         st.metric("Power", f"${acc.get('Power', 0):,.0f}")
         
-        # Portfolio Graph
         st.markdown("---")
         st.caption("24H Equity Curve")
         try:
@@ -96,14 +52,6 @@ with st.sidebar:
                 clean_equity = [x if x is not None else 0 for x in hist.equity]
                 st.area_chart(pd.DataFrame({"Equity": clean_equity}), height=100, color="#29b5e8")
         except: st.caption("Graph unavailable")
-        
-        # Historic Stats
-        st.markdown("---")
-        perf = broker.get_portfolio_history_stats()
-        c1, c2 = st.columns(2)
-        c1.write(f"1D: {perf.get('1D','N/A')}"); c2.write(f"1W: {perf.get('1W','N/A')}")
-        c3, c4 = st.columns(2)
-        c3.write(f"1M: {perf.get('1M','N/A')}"); c4.write(f"1Y: {perf.get('1A','N/A')}")
     else:
         st.error("🔴 DISCONNECTED")
 
@@ -112,20 +60,22 @@ with st.sidebar:
     if st.button("🛑 STOP" if eng else "🚀 START", use_container_width=True):
         update_status("engine_running", "0" if eng else "1"); st.rerun()
 
-# Market Bar
-if broker: st.info(f"**{broker.get_market_clock()}**")
+# --- MAIN HEADER (MARKET CLOCK) ---
+# Fixed: Explicitly calling this here ensures it renders at the top
+clock_status = broker.get_market_clock()
+if "Closed" in clock_status:
+    st.error(f"**{clock_status}**")
+else:
+    st.success(f"**{clock_status}**")
 
 # --- TABS ---
 t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution", "🔍 Debug"])
 
-with t1: # ASSETS (COMPACT VIEW)
+with t1: # ASSETS
     positions = broker.get_all_positions()
     if positions:
-        # Sort by Market Value descending
         positions.sort(key=lambda x: float(x.market_value), reverse=True)
-        
         for p in positions:
-            # 1. Gather Data
             symbol = p.symbol
             qty = float(p.qty)
             curr_price = float(p.current_price)
@@ -133,76 +83,53 @@ with t1: # ASSETS (COMPACT VIEW)
             pl_pct = float(p.unrealized_plpc) * 100
             mkt_val = float(p.market_value)
             
-            # 2. Fetch & Format Orders
+            # Orders
             open_orders = broker.get_orders_for_symbol(symbol)
             order_html_list = []
-            
             if open_orders:
                 for o in open_orders:
-                    # Determine Trigger Price
                     trigger = o.limit_price or o.stop_price
                     trigger_val = float(trigger) if trigger else 0.0
                     
-                    # Calculate Distance %
                     dist_str = ""
                     if trigger_val > 0 and curr_price > 0:
                         dist = -1 * ((trigger_val - curr_price) / curr_price) * 100
                         dist_str = f" <span style='color:{'#28a745' if dist>0 else '#dc3545'}'>({dist:+.1f}%)</span>"
                     
-                    # Determine Label
                     lbl = o.order_type.upper()
                     if o.side == 'sell':
                         if trigger_val > curr_price: lbl = "🎯 TP" 
                         elif trigger_val < curr_price: lbl = "🛑 SL" 
                     
                     price_display = f"${trigger_val:.2f}" if trigger_val > 0 else "MKT"
-                    
-                    # Create HTML Chip
                     chip = f"<span class='order-chip'><b>{lbl}</b>: {price_display}{dist_str}</span>"
                     order_html_list.append(chip)
             else:
                 order_html_list.append("<span style='color:#888; font-style:italic; font-size:0.8rem;'>No pending orders</span>")
 
             orders_html = "".join(order_html_list)
-
-            # 3. Dynamic Logo URL (TradingView Source)
             logo_url = f"https://s3-symbol-logo.tradingview.com/{symbol.lower()}.svg"
             
-            # 4. Render Card
             with st.container(border=True):
-                # Header Row
                 c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1, 1, 1.2])
-                
-                # REPLACED CIRCLE WITH LOGO IMG
                 c1.markdown(f"""
                     <div style="display:flex; align-items:center;">
                         <img src="{logo_url}" class="ticker-logo" onerror="this.style.display='none'">
                         <h3 style="margin:0; padding:0;">{symbol}</h3>
                     </div>
                 """, unsafe_allow_html=True)
-                
                 c2.metric("Qty", f"{qty:.1f}")
                 c3.metric("Price", f"${curr_price:.2f}")
-                
-                # P/L METRIC (Explicit Sign for Delta)
                 delta_str = f"{'+' if pl_val >= 0 else '-'}${abs(pl_val):.2f}"
                 c4.metric("P/L", f"{pl_pct:+.2f}%", delta_str)
-                
                 c5.metric("Value", f"${mkt_val:,.0f}")
-                
-                # Order Row
-                st.markdown(f"""
-                <div style="margin-top: -10px; margin-bottom: 5px;">
-                    {orders_html}
-                </div>
-                """, unsafe_allow_html=True)
-
+                st.markdown(f"""<div style="margin-top: -10px; margin-bottom: 5px;">{orders_html}</div>""", unsafe_allow_html=True)
     else: st.info("No active positions.")
 
-with t2: # ⚙️ STRATEGIES
-    st.subheader("Active Strategy Configurations (Database)")
+with t2: # STRATEGIES
+    st.subheader("Active Strategy Configurations")
     try:
-        strategies = get_strategies() # From src.database
+        strategies = get_strategies()
         if strategies:
             display_data = []
             for ticker, params in strategies.items():
@@ -215,13 +142,12 @@ with t2: # ⚙️ STRATEGIES
                 })
             st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
         else:
-            st.warning("No strategies found in Database. Run the Tuner.")
+            st.warning("No strategies found. Run the Tuner.")
             if st.button("Run Tuner Now"):
                 st.info("Please run: docker exec algo_heart python src/tuner.py")
-    except Exception as e:
-        st.error(f"Error reading strategies from DB: {e}")
+    except Exception as e: st.error(f"DB Error: {e}")
 
-with t3: # FULL MANUAL TICKET
+with t3: # MANUAL TICKET
     st.subheader("🕹️ Advanced Manual Ticket")
     with st.form("manual_trade"):
         c1, c2, c3, c4 = st.columns(4)
@@ -238,11 +164,26 @@ with t3: # FULL MANUAL TICKET
         tp = b1.number_input("Take Profit $", 0.0); sl = b2.number_input("Stop Loss $", 0.0)
         
         if st.form_submit_button("🚀 Submit Order", use_container_width=True):
+            # 2️⃣ Submit order via Broker
             ok, res = broker.submit_order_v2(mtype, symbol=msym, qty=mqty, side=mside, limit_price=lpx if lpx>0 else None, time_in_force=tif)
-            if ok: st.success(f"Sent: {res}")
-            else: st.error(res)
+            
+            if ok: 
+                st.success(f"Sent: {res}")
+                
+                # 3️⃣ TRIGGER SLACK NOTIFICATION
+                try:
+                    send_trade_notification()
+                    st.toast("Slack Notification Sent!", icon="🔔")
+                except Exception as e:
+                    st.error(f"Notification Failed: {e}")
+                
+                # 4️⃣ WAIT & RELOAD (Update Asset Tab)
+                time.sleep(1.5) # Allow Alpaca 1.5s to process the order
+                st.rerun()      # Force refresh of the UI
+            else: 
+                st.error(res)
 
-with t4: # PERSISTENT EXECUTION
+with t4: # EXECUTION
     st.subheader("⚡ Persistent History")
     with sqlite3.connect(DB_PATH) as conn:
         try:
@@ -250,29 +191,17 @@ with t4: # PERSISTENT EXECUTION
             st.dataframe(df, use_container_width=True, height=450)
         except: st.info("No records found.")
 
-with t5: # Diagnostics Tab
+with t5: # DEBUG
     st.header("🔍 System Diagnostics")
-    
-    # 1. Physical Resource Gauges
     r1, r2, r3 = st.columns(3)
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-    
-    # RAM
     r1.metric("RAM Usage", f"{mem.percent}%", f"{mem.used//1024**2}MB Used")
-    
-    # DISK (The "Nuke" Indicator)
     disk_color = "normal" if disk.percent < 85 else "inverse"
     r2.metric("Disk Space", f"{disk.free//1024**3}GB Free", f"{disk.percent}% Used", delta_color=disk_color)
-    
-    # LATENCY
     avg_lat = broker.get_mean_latency_24h()
     r3.metric("Avg Latency (24h)", f"{avg_lat:.1f}ms")
-
     st.divider()
-    
-    # 2. Key Check & Endpoint Status
-    st.subheader("2. API Routing Logic")
     act_key, _, is_paper = Config.get_auth()
     st.markdown(f"""<div class="debug-card">
         <b>Active Mode:</b> {Config.MODE}<br>

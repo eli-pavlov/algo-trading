@@ -1,13 +1,6 @@
 // .dockerignore
 
 
-// .env
-APIKEY=<apikey>
-SECRETKEY=<secretkey>
-REPORT_LINK=<report_link>
-PAPER_URL=<paper_url>
-DB_PATH=<db_path>
-
 // .flake8
 [flake8]
 ignore = E501, E302, E305, E722, F401, W292, W291, W293, E701, E225
@@ -62,7 +55,152 @@ fine_tuner.*
 market_scanner.*
 
 // config/strategies.yaml
+system:
+  log_level: "INFO"
 
+strategies:
+  # ==========================================
+  # 🏆 THE MONSTERS (High Volatility Winners)
+  # ==========================================
+  
+  # CVNA: Deep Tune Winner (+666%)
+  # Strategy: "Raging Bull" - Buys shallow dips, uses wide 20% trail to survive volatility.
+  CVNA:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 7
+    rsi_panic_threshold: 50
+    ema_length: 20
+    trail_pct: 0.20
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # HOOD: Deep Tune Winner (+580%)
+  # Strategy: "Momentum Runner" - Needs a slow EMA 100 filter but buys aggressively.
+  HOOD:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 7
+    rsi_panic_threshold: 45
+    ema_length: 100
+    trail_pct: 0.20
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # PLTR: Initial Selection Winner (+447%)
+  # Strategy: "Aggressive Growth" - Beating the 'Deep Tune' by buying earlier (RSI 45 vs 30).
+  PLTR:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 7
+    rsi_panic_threshold: 45
+    ema_length: 50
+    trail_pct: 0.12
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # ==========================================
+  # 🏛️ THE FOUNDATION (Tech & Semis)
+  # ==========================================
+
+  # MU: Deep Tune Winner (+367%)
+  # Strategy: "Cyclical Swing" - Uses smoother RSI 14 to avoid chop.
+  MU:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 14
+    rsi_panic_threshold: 50
+    ema_length: 20
+    trail_pct: 0.12
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # NVDA: Initial Selection Winner (+366%)
+  # Strategy: "Trend Leader" - Needs EMA 35 and deep panic (<30) to enter safely.
+  NVDA:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 7
+    rsi_panic_threshold: 30
+    ema_length: 35
+    trail_pct: 0.12
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # TSLA: Deep Tune Winner (+364%)
+  # Strategy: "The Sniper" - Your original champion. Strict panic (<30) entry.
+  TSLA:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 7
+    rsi_panic_threshold: 30
+    ema_length: 35
+    trail_pct: 0.10
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # AVGO: Deep Tune Winner (+299%)
+  # Strategy: "Steady Climber" - Needs the widest trail (20%) to breathe.
+  AVGO:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 14
+    rsi_panic_threshold: 50
+    ema_length: 20
+    trail_pct: 0.20
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # ==========================================
+  # ⚡ LEVERAGE & GROWTH (High Risk/Reward)
+  # ==========================================
+
+  # TQQQ: Initial Selection Winner (+268%)
+  # Strategy: "Leverage King" - Fast EMA 20 to catch rapid market reversals.
+  TQQQ:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 7
+    rsi_panic_threshold: 45
+    ema_length: 20
+    trail_pct: 0.15
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # TSM: Deep Tune Winner (+218%)
+  # Strategy: "Value Fab" - Aggressive entry (RSI 50) on fast trend (EMA 20).
+  TSM:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 7
+    rsi_panic_threshold: 50
+    ema_length: 20
+    trail_pct: 0.12
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
+
+  # SHOP: Initial Selection Winner (+218%)
+  # Strategy: "Conservative Growth" - The 'Deep Tune' failed here (too strict).
+  # This version buys deep dips (RSI 30) but smooths them (RSI 14).
+  SHOP:
+    enabled: true
+    timeframe: "2h"
+    qty: 1
+    rsi_length: 14
+    rsi_panic_threshold: 30
+    ema_length: 20
+    trail_pct: 0.15
+    stop_loss_pct: 0.10
+    take_profit_pct: 0.50
 
 // docker-compose.yaml
 services:
@@ -370,7 +508,7 @@ pipeline {
 
 // README.md
 ﻿# algo-trading
-Algorithmic Trading Bot Monorepo
+Algorithmic Trading Bot Monorepo.
 
 // requirements.txt
 alpaca-py
@@ -943,6 +1081,7 @@ def update_trade_fill(order_id, fill_px, filled_at):
 // src/main.py
 import schedule
 import time
+import threading
 import numpy as np
 import yfinance as yf
 import pandas as pd
@@ -951,6 +1090,30 @@ from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
 from src.broker import Broker
 from src.notifications import send_trade_notification
+from src.tuner import optimize_stock, TICKERS  # Import Tuner functions
+
+# --- ASYNC TUNER LOGIC ---
+
+def _run_tuner_job():
+    """The actual heavy lifting function that runs in a background thread."""
+    print("🧠 Starting Scheduled Weekly Tuning (Background Thread)...")
+    try:
+        # Create a dedicated broker instance for the tuner
+        broker_tuner = Broker()
+        for t in TICKERS:
+            # This function (from src.tuner) already handles 2H resampling internally
+            optimize_stock(t, broker_tuner)
+        print("✅ Weekly Tuning Complete. New strategies saved to DB.")
+    except Exception as e:
+        print(f"❌ Tuning Thread Error: {e}")
+
+def schedule_async_tuner():
+    """Spawns the tuner thread so the main loop doesn't freeze."""
+    print("⏳ Triggering Async Tuner...")
+    t = threading.Thread(target=_run_tuner_job)
+    t.start()
+
+# --- TRADING LOGIC ---
 
 def process_manual_queue(broker):
     try:
@@ -965,7 +1128,7 @@ def process_manual_queue(broker):
         print(f"Manual Queue Error: {e}")
 
 def heart_beat():
-    # 1. Update Heartbeat File
+    # 1. Update Heartbeat File (for health checks)
     with open("/tmp/heartbeat", "w") as f: f.write(str(time.time()))
 
     broker = Broker()
@@ -975,7 +1138,7 @@ def heart_beat():
     update_status("api_health", msg)
     if not ok: return
 
-    # 3. Manual Orders (Always run)
+    # 3. Manual Orders (Always run, even if engine is paused)
     process_manual_queue(broker)
 
     # 4. Check Engine Switch
@@ -991,30 +1154,49 @@ def heart_beat():
     stats = broker.get_account_stats()
     cash = stats.get('Cash', 0.0)
     equity = stats.get('Equity', 0.0)
+    # Simple allocation: Divide equity equally among active strategies
     target_per_stock = equity / len(strategies)
 
     for sym, p in strategies.items():
-        # A. Get Data
-        df = yf.download(sym, period="5d", interval="1h", progress=False)
-        if df.empty: continue
+        # A. Get Data (1H Interval - 10 days is enough for indicators)
+        df = yf.download(sym, period="10d", interval="1h", progress=False)
+        if df.empty or len(df) < 14: continue
         
-        # B. Calc Indicators
-        # (Assuming simple close series)
-        close = df['Close']
-        if isinstance(close, pd.DataFrame): close = close.iloc[:,0]
-        
+        # B. Clean & Resample to 2H (STRICT MATCH TO BACKTEST)
         try:
-            rsi = RSIIndicator(close).rsi().iloc[-1]
-            adx = ADXIndicator(df['High'], df['Low'], close).adx().iloc[-1]
-        except: continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-        # C. Check Positions
+            # Resample logic: 2H candles anchored to start of day (9:30, 11:30, etc.)
+            logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+            df_2h = df.resample('2h', origin='start_day').apply(logic).dropna()
+            
+            if len(df_2h) < 14: continue 
+
+            # C. Calc Indicators on 2H Data
+            # Note: We use iloc[-2] (The last COMPLETED candle) for signals.
+            # This ensures we don't act on a "developing" candle that might repaint.
+            # This matches the Backtest logic of "Close".
+            
+            close_series = df_2h['Close']
+            high_series = df_2h['High']
+            low_series = df_2h['Low']
+            
+            # Using iloc[-2] for "Confirmed" signal
+            confirmed_rsi = RSIIndicator(close_series).rsi().iloc[-2]
+            confirmed_adx = ADXIndicator(high_series, low_series, close_series).adx().iloc[-2]
+
+        except Exception as e:
+            print(f"Calc Error {sym}: {e}")
+            continue
+
+        # D. Check Positions
         pos = broker.is_holding(sym)
 
-        # D. Logic
+        # E. Execution Logic (Using Confirmed 2H Signals)
         if not pos:
-            # ENTRY
-            if adx > p.get('adx_trend', 25) and rsi > p.get('rsi_trend', 50):
+            # ENTRY (Checks strictly against Tuned parameters)
+            if confirmed_adx > p.get('adx_trend', 25) and confirmed_rsi > p.get('rsi_trend', 50):
                 price = broker.get_latest_price(sym)
                 if price > 0 and cash > price:
                     qty = int(min(cash, target_per_stock) / price)
@@ -1023,22 +1205,37 @@ def heart_beat():
                         tp_price = round(price * (1 + p['target']), 2)
                         sl_price = round(price * (1 - p['stop']), 2)
                         
-                        # EXECUTE BRACKET
-                        if broker.buy_bracket(sym, qty, tp_price, sl_price):
+                        # EXECUTE BRACKET (Market Buy + TP/SL Legs)
+                        success, order_id = broker.submit_order_v2(
+                            "market", 
+                            symbol=sym, 
+                            qty=qty, 
+                            side="buy", 
+                            take_profit={"limit_price": tp_price}, 
+                            stop_loss={"stop_price": sl_price}
+                        )
+                        
+                        if success:
                             send_trade_notification()
-                            cash -= (qty * price) # Adjust local cash estimate
+                            cash -= (qty * price) # Adjust local cash estimate to prevent double spend
         else:
             # EXIT (Panic / Strategy Exit)
-            # Note: The Bracket order handles TP/SL automatically!
-            # We only need to force sell if RSI indicates a crash not caught by SL
-            if rsi < 40:
+            # If 2H RSI drops below 40 (Safety net), close it regardless of stops.
+            if confirmed_rsi < 40:
                 broker.close_position(sym)
                 send_trade_notification()
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trader (Alpaca-Py Edition) Starting...")
+    print("🚀 Algo-Trader (2H Strategy + Async Tuner) Starting...")
+    
+    # 1. TRADING SCHEDULE: Run the strategy check every minute
     schedule.every(1).minutes.do(heart_beat)
+    
+    # 2. TUNING SCHEDULE: Run optimization every Friday at 23:00 (11 PM)
+    # This runs in a background thread so it won't block the trading loop.
+    schedule.every().friday.at("23:00").do(schedule_async_tuner)
+    
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -1151,6 +1348,7 @@ TICKERS = ['HOOD', 'AMD', 'AI', 'CVNA', 'PLTR']
 
 def get_stock_data(symbol):
     try:
+        # Download 1H data (we will aggregate this to 2H)
         df = yf.download(symbol, period="1y", interval="1h", progress=False, threads=False, auto_adjust=False)
         if df.empty:
             return None
@@ -1158,12 +1356,14 @@ def get_stock_data(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        for c in ["Open", "High", "Low", "Close"]:
+        # Standardize columns
+        for c in ["Open", "High", "Low", "Close", "Volume"]:
             if c in df.columns:
                 s = df[c]
                 if isinstance(s, pd.DataFrame):
                     s = s.iloc[:, 0]
                 df[c] = pd.Series(np.asarray(s).reshape(-1), index=df.index)
+        
         return df
     except Exception:
         return None
@@ -1172,32 +1372,47 @@ def get_stock_data(symbol):
 def precompute_indicators(df):
     df = df.copy()
     try:
-        adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+        # --- CRITICAL: Resample to 2H to match Backtest Logic ---
+        # Origin='start_day' ensures 9:30 candles align correctly (9:30-11:30)
+        # We assume 9:30 market open.
+        logic = {
+            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+        }
+        # offset='30min' helps align with NYSE 9:30 open if the index is clean, 
+        # but origin='start_day' is usually safer for intraday chunks
+        df_2h = df.resample('2h', origin='start_day').apply(logic).dropna()
+
+        if df_2h.empty: return None
+
+        # --- Calculate Indicators on the 2H Data ---
+        adx_df = ta.adx(df_2h['High'], df_2h['Low'], df_2h['Close'], length=14)
         if adx_df is None or adx_df.empty:
             return None
 
-        # Robust column search
         adx_col = next((c for c in adx_df.columns if c.startswith("ADX")), None)
         if not adx_col:
             return None
 
-        df['ADX'] = adx_df[adx_col]
-        df['RSI'] = ta.rsi(df['Close'], length=14)
+        df_2h['ADX'] = adx_df[adx_col]
+        df_2h['RSI'] = ta.rsi(df_2h['Close'], length=14)
 
-        # Shift for anti-lookahead
-        df['ADX_Prev'] = df['ADX'].shift(1)
-        df['RSI_Prev'] = df['RSI'].shift(1)
-        df.dropna(inplace=True)
-        return df
-    except Exception:
+        # Shift for anti-lookahead (Decision based on PREVIOUS closed candle)
+        df_2h['ADX_Prev'] = df_2h['ADX'].shift(1)
+        df_2h['RSI_Prev'] = df_2h['RSI'].shift(1)
+        df_2h.dropna(inplace=True)
+        
+        return df_2h
+    except Exception as e:
+        print(f"Indicator Error: {e}")
         return None
 
 
 def objective(trial, df):
-    adx_thresh = trial.suggest_int("adx_trend", 20, 30)
-    rsi_thresh = trial.suggest_int("rsi_trend", 45, 60)
-    tp = trial.suggest_float("target", 0.10, 0.30)
-    sl = trial.suggest_float("stop", 0.05, 0.10)
+    # Parameter Search Space
+    adx_thresh = trial.suggest_int("adx_trend", 20, 35)
+    rsi_thresh = trial.suggest_int("rsi_trend", 40, 65)
+    tp = trial.suggest_float("target", 0.05, 0.25)
+    sl = trial.suggest_float("stop", 0.03, 0.12)
 
     opens = df['Open'].values
     highs = df['High'].values
@@ -1215,7 +1430,7 @@ def objective(trial, df):
             stop_px = entry * (1 - sl)
             take_px = entry * (1 + tp)
 
-            # Simulated Execution using High/Low
+            # Execution Logic (Simplified)
             if lows[i] <= stop_px:
                 balance = pos * min(opens[i], stop_px)
                 pos = 0
@@ -1224,13 +1439,14 @@ def objective(trial, df):
                 balance = pos * max(opens[i], take_px)
                 pos = 0
                 continue
-
-            # Trend Reversal Safety
-            if rsi_p[i] < 40:
+            
+            # RSI Panic Exit (on 2H bar close)
+            if rsi_p[i] < 35: 
                 balance = pos * opens[i]
                 pos = 0
                 continue
         else:
+            # Entry Logic
             if adx_p[i] > adx_thresh and rsi_p[i] > rsi_thresh:
                 entry = opens[i]
                 pos = balance / entry
@@ -1240,10 +1456,12 @@ def objective(trial, df):
 
 
 def optimize_stock(symbol, broker):
-    print(f"🕵️ Tuning {symbol}...")
+    print(f"🕵️ Tuning {symbol} (2H timeframe)...")
     raw = get_stock_data(symbol)
     if raw is None or len(raw) < 100:
         return
+    
+    # Precompute converts 1H raw -> 2H signals
     df = precompute_indicators(raw)
     if df is None:
         return
@@ -1251,11 +1469,12 @@ def optimize_stock(symbol, broker):
     try:
         sampler = optuna.samplers.TPESampler(seed=42)
         study = optuna.create_study(direction="maximize", sampler=sampler)
-        study.optimize(partial(objective, df=df), n_trials=100)
+        study.optimize(partial(objective, df=df), n_trials=50) # 50 trials for speed
 
         is_holding = broker.is_holding(symbol)
         save_strategy(symbol, study.best_params, is_holding is not None)
-        print(f"✅ Tuned {symbol}: {study.best_value:.2%}")
+        print(f"✅ Tuned {symbol}: {study.best_value:.2%} (Params: {study.best_params})")
+        
         del df
         del raw
         del study
@@ -1267,6 +1486,6 @@ def optimize_stock(symbol, broker):
 if __name__ == "__main__":
     init_db()
     broker = Broker()
-    print("🚀 Starting AI Parameter Tuning...")
+    print("🚀 Starting AI Parameter Tuning (2H Candles)...")
     for t in TICKERS:
         optimize_stock(t, broker)
