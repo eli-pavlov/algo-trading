@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import urllib3
-import time  # <--- Added import
+import time  # <--- Make sure this is imported
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from alpaca.trading.client import TradingClient
@@ -27,6 +27,16 @@ class Broker:
             return True, f"Connected to {self.mode} ({acc.id})"
         except Exception as e:
             return False, str(e)
+
+    # --- NEW: LIVE PING FUNCTION ---
+    def ping(self):
+        """Measures real-time round-trip latency to Alpaca API."""
+        try:
+            t0 = time.time()
+            self.client.get_clock() # Lightweight call
+            return (time.time() - t0) * 1000
+        except:
+            return -1.0
 
     def get_market_clock(self):
         try:
@@ -62,6 +72,7 @@ class Broker:
         return data
 
     def get_mean_latency_24h(self):
+        """Still useful for historical analysis, but not for the live dashboard."""
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 query = """
@@ -90,42 +101,28 @@ class Broker:
         try:
             req = GetOrdersRequest(status=QueryOrderStatus.ALL, symbols=[symbol], limit=50)
             all_orders = self.client.get_orders(req)
-            
             active_orders = []
-            terminal_states = [
-                OrderStatus.FILLED, 
-                OrderStatus.CANCELED, 
-                OrderStatus.EXPIRED, 
-                OrderStatus.REJECTED
-            ]
-            
+            terminal_states = [OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED]
             for o in all_orders:
                 if o.status not in terminal_states:
                     active_orders.append(o)
-                    
             return active_orders
         except Exception as e: 
             print(f"Order fetch error: {e}")
             return []
 
     def submit_order_v2(self, order_type, **kwargs):
-        """Submits order and measures REAL latency."""
         try:
-            # Map string to Enum
             kwargs['side'] = OrderSide.BUY if kwargs['side'].lower() == 'buy' else OrderSide.SELL
             kwargs['time_in_force'] = TimeInForce.GTC if kwargs['time_in_force'].lower() == 'gtc' else TimeInForce.DAY
             
             if order_type == "market": req = MarketOrderRequest(**kwargs)
             elif order_type == "limit": req = LimitOrderRequest(**kwargs)
-            # ... handle others ...
             
-            # ⏱️ MEASURE LATENCY HERE
             t0 = time.time()
             order = self.client.submit_order(req)
             latency_ms = (time.time() - t0) * 1000
             
-            # Log with real latency
             log_trade_attempt(str(order.id), kwargs['symbol'], str(kwargs['side']), kwargs['qty'], order_type, 0.0, latency_ms)
-            
             return True, order.id
         except Exception as e: return False, str(e)
