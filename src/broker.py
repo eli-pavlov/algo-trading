@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import urllib3
+import time  # <--- Added import
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from alpaca.trading.client import TradingClient
@@ -50,7 +51,6 @@ class Broker:
         data = {}
         for label, p in periods.items():
             try:
-                # Historical metrics restored for alpaca-py
                 req = GetPortfolioHistoryRequest(period=p, timeframe="1D")
                 hist = self.client.get_portfolio_history(req)
                 if hist and len(hist.equity) > 1:
@@ -62,10 +62,8 @@ class Broker:
         return data
 
     def get_mean_latency_24h(self):
-        """Calculates mean API latency from SQLite for the last 24 hours."""
         try:
             with sqlite3.connect(DB_PATH) as conn:
-                # SQLite timestamp filtering for last 24h
                 query = """
                     SELECT AVG(api_latency_ms) FROM trade_execution 
                     WHERE submitted_at >= datetime('now', '-24 hours')
@@ -89,14 +87,10 @@ class Broker:
         except: return None
 
     def get_orders_for_symbol(self, symbol):
-        """Fetches active orders (Limit, Stop, etc) for a specific ticker."""
         try:
-            # FIX: Use QueryOrderStatus.ALL to catch 'HELD' and 'NEW' orders
-            # Alpaca defaults to 'OPEN' which hides bracket legs until triggered
             req = GetOrdersRequest(status=QueryOrderStatus.ALL, symbols=[symbol], limit=50)
             all_orders = self.client.get_orders(req)
             
-            # Filter out dead orders manually
             active_orders = []
             terminal_states = [
                 OrderStatus.FILLED, 
@@ -115,18 +109,23 @@ class Broker:
             return []
 
     def submit_order_v2(self, order_type, **kwargs):
-        """Expanded submitter to handle advanced order types from UI."""
+        """Submits order and measures REAL latency."""
         try:
             # Map string to Enum
             kwargs['side'] = OrderSide.BUY if kwargs['side'].lower() == 'buy' else OrderSide.SELL
             kwargs['time_in_force'] = TimeInForce.GTC if kwargs['time_in_force'].lower() == 'gtc' else TimeInForce.DAY
             
-            # Use appropriate Request model
             if order_type == "market": req = MarketOrderRequest(**kwargs)
             elif order_type == "limit": req = LimitOrderRequest(**kwargs)
             # ... handle others ...
             
+            # ⏱️ MEASURE LATENCY HERE
+            t0 = time.time()
             order = self.client.submit_order(req)
-            log_trade_attempt(str(order.id), kwargs['symbol'], str(kwargs['side']), kwargs['qty'], order_type, 0.0, 0.0)
+            latency_ms = (time.time() - t0) * 1000
+            
+            # Log with real latency
+            log_trade_attempt(str(order.id), kwargs['symbol'], str(kwargs['side']), kwargs['qty'], order_type, 0.0, latency_ms)
+            
             return True, order.id
         except Exception as e: return False, str(e)

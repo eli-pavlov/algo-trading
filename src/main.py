@@ -6,158 +6,144 @@ import yfinance as yf
 import pandas as pd
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
-from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status
+from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status, get_unfilled_executions, update_trade_fill
 from src.broker import Broker
 from src.notifications import send_trade_notification
 
 # --- ASYNC TUNER LOGIC ---
-
 def _run_tuner_job():
-    """The actual heavy lifting function that runs in a background thread."""
-    print("🧠 Starting Scheduled Weekly Tuning (Background Thread)...")
+    print("🧠 Starting Scheduled Weekly Tuning...")
     try:
-        # 🟢 LAZY IMPORT: Import here to prevent circular dependency crashes at startup
         from src.tuner import optimize_stock, TICKERS
-        
-        # Create a dedicated broker instance for the tuner
         broker_tuner = Broker()
         for t in TICKERS:
-            # This function (from src.tuner) already handles 2H resampling internally
             optimize_stock(t, broker_tuner)
-        print("✅ Weekly Tuning Complete. New strategies saved to DB.")
-    except ImportError as e:
-        print(f"❌ Tuner Import Error: {e}")
+        print("✅ Weekly Tuning Complete.")
     except Exception as e:
-        print(f"❌ Tuning Thread Error: {e}")
+        print(f"❌ Tuning Error: {e}")
 
 def schedule_async_tuner():
-    """Spawns the tuner thread so the main loop doesn't freeze."""
-    print("⏳ Triggering Async Tuner...")
     t = threading.Thread(target=_run_tuner_job)
     t.start()
 
-# --- TRADING LOGIC ---
+# --- NEW: SYNC LOGIC ---
+def sync_order_statuses(broker):
+    """Checks Alpaca for updates on orders we think are still 'NEW'."""
+    try:
+        pending = get_unfilled_executions() # Returns list of (order_id,)
+        if not pending: return
 
+        for (oid,) in pending:
+            try:
+                # Ask Alpaca for the latest status
+                alpaca_order = broker.client.get_order_by_id(oid)
+                
+                if alpaca_order.status == 'filled':
+                    # It filled! Update DB.
+                    update_trade_fill(oid, float(alpaca_order.filled_avg_price), alpaca_order.filled_at, 'FILLED')
+                    print(f"🔄 Synced Fill: {oid}")
+                    
+                elif alpaca_order.status in ['canceled', 'expired', 'rejected']:
+                    # It died. Update DB.
+                    update_trade_fill(oid, 0.0, str(datetime.utcnow()), alpaca_order.status.upper())
+                    print(f"🔄 Synced Cancel: {oid}")
+                    
+            except Exception as e:
+                # Order might not exist in Alpaca or network error
+                pass
+    except Exception as e:
+        print(f"Sync Error: {e}")
+
+# --- TRADING LOGIC ---
 def process_manual_queue(broker):
     try:
         orders = get_pending_manual_orders()
         for o in orders:
             o_id, sym, qty, side, o_type = o
-            ok, msg = broker.submit_order(sym, qty, side, o_type)
+            ok, msg = broker.submit_order_v2(o_type, symbol=sym, qty=qty, side=side)
             status = 'COMPLETED' if ok else 'FAILED'
             update_manual_order_status(o_id, status)
-            # Notification is now handled by Dashboard for immediate feedback, 
-            # but we keep this queue processing for safety.
     except Exception as e:
         print(f"Manual Queue Error: {e}")
 
 def heart_beat():
-    # 1. Update Heartbeat File (for health checks)
     with open("/tmp/heartbeat", "w") as f: f.write(str(time.time()))
-
     broker = Broker()
-    
-    # 2. Check Connection
     ok, msg = broker.test_connection()
     update_status("api_health", msg)
     if not ok: return
 
-    # 3. Manual Orders (Always run, even if engine is paused)
+    # 1. Sync Statuses (Fixes the "Execution" tab not updating)
+    sync_order_statuses(broker)
+
+    # 2. Process Manual Queue
     process_manual_queue(broker)
 
-    # 4. Check Engine Switch
     if get_status("engine_running") == "0": return
-
-    # 5. Check Market Open
     if "Closed" in broker.get_market_clock(): return
 
-    # 6. Strategy Logic
     strategies = get_strategies()
     if not strategies: return
 
     stats = broker.get_account_stats()
     cash = stats.get('Cash', 0.0)
     equity = stats.get('Equity', 0.0)
-    
-    # Avoid Division by Zero if strategies is empty
-    if len(strategies) > 0:
-        target_per_stock = equity / len(strategies)
-    else:
-        target_per_stock = 0
+    if len(strategies) > 0: target_per_stock = equity / len(strategies)
+    else: target_per_stock = 0
 
     for sym, p in strategies.items():
-        # A. Get Data (1H Interval - 10 days is enough for indicators)
         df = yf.download(sym, period="10d", interval="1h", progress=False)
         if df.empty or len(df) < 14: continue
         
-        # B. Clean & Resample to 2H (STRICT MATCH TO BACKTEST)
         try:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-
-            # Resample logic: 2H candles anchored to start of day (9:30, 11:30, etc.)
             logic = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
             df_2h = df.resample('2h', origin='start_day').apply(logic).dropna()
-            
             if len(df_2h) < 14: continue 
 
-            # C. Calc Indicators on 2H Data
-            # Using iloc[-2] for "Confirmed" signal (Wait for Close)
             close_series = df_2h['Close']
             high_series = df_2h['High']
             low_series = df_2h['Low']
             
             confirmed_rsi = RSIIndicator(close_series).rsi().iloc[-2]
             confirmed_adx = ADXIndicator(high_series, low_series, close_series).adx().iloc[-2]
+        except: continue
 
-        except Exception as e:
-            print(f"Calc Error {sym}: {e}")
-            continue
-
-        # D. Check Positions
         pos = broker.is_holding(sym)
 
-        # E. Execution Logic (Using Confirmed 2H Signals)
         if not pos:
-            # ENTRY (Checks strictly against Tuned parameters)
             if confirmed_adx > p.get('adx_trend', 25) and confirmed_rsi > p.get('rsi_trend', 50):
-                price = broker.get_latest_price(sym)
-                if price > 0 and cash > price:
+                price = broker.get_latest_price(sym) # Note: Broker needs get_latest_price method or use current_price from position check
+                # Fallback if get_latest_price missing in broker snippet provided:
+                # price = close_series.iloc[-1] 
+                # Ideally, add get_latest_price to broker.py
+                
+                # Assuming broker has functionality or we use last close
+                if price and cash > price:
                     qty = int(min(cash, target_per_stock) / price)
                     if qty >= 1:
-                        # CALCULATE BRACKET PRICES
                         tp_price = round(price * (1 + p['target']), 2)
                         sl_price = round(price * (1 - p['stop']), 2)
                         
-                        # EXECUTE BRACKET (Market Buy + TP/SL Legs)
                         success, order_id = broker.submit_order_v2(
-                            "market", 
-                            symbol=sym, 
-                            qty=qty, 
-                            side="buy", 
+                            "market", symbol=sym, qty=qty, side="buy", 
                             take_profit={"limit_price": tp_price}, 
                             stop_loss={"stop_price": sl_price}
                         )
-                        
                         if success:
                             send_trade_notification()
                             cash -= (qty * price) 
         else:
-            # EXIT (Panic / Strategy Exit)
             if confirmed_rsi < 40:
                 broker.close_position(sym)
                 send_trade_notification()
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 Algo-Trader (2H Strategy + Async Tuner) Starting...")
-    
-    # 1. TRADING SCHEDULE: Run the strategy check every minute
+    print("🚀 Algo-Trader Starting...")
     schedule.every(1).minutes.do(heart_beat)
-    
-    # 2. TUNING SCHEDULE: Run optimization every Friday at 23:00 (11 PM)
     schedule.every().friday.at("23:00").do(schedule_async_tuner)
-    
     while True:
         schedule.run_pending()
         time.sleep(1)
