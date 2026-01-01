@@ -4,6 +4,7 @@ import threading
 import numpy as np
 import yfinance as yf
 import pandas as pd
+from datetime import datetime
 from ta.trend import ADXIndicator
 from ta.momentum import RSIIndicator
 from src.database import init_db, get_strategies, get_status, update_status, get_pending_manual_orders, update_manual_order_status, get_unfilled_executions, update_trade_fill
@@ -12,27 +13,24 @@ from src.notifications import send_trade_notification
 
 # --- ASYNC TUNER LOGIC ---
 def _run_tuner_job():
-    print("🧠 Starting Scheduled Weekly Tuning (Background Thread)...")
+    print("🧠 Starting Scheduled Weekly Tuning...")
     try:
-        # 🟢 LAZY IMPORT: Prevents Circular Import Crash at Startup
+        # 🟢 LAZY IMPORT to prevent crash at startup
         from src.tuner import optimize_stock, TICKERS
         
         broker_tuner = Broker()
         for t in TICKERS:
             optimize_stock(t, broker_tuner)
-        print("✅ Weekly Tuning Complete. New strategies saved to DB.")
+        print("✅ Weekly Tuning Complete.")
     except Exception as e:
-        print(f"❌ Tuning Thread Error: {e}")
+        print(f"❌ Tuning Error: {e}")
 
 def schedule_async_tuner():
-    """Spawns the tuner thread so the main loop doesn't freeze."""
-    print("⏳ Triggering Async Tuner...")
     t = threading.Thread(target=_run_tuner_job)
     t.start()
 
-# --- SYNC LOGIC ---
+# --- SYNC LOGIC (Fixes "Pending" Orders) ---
 def sync_order_statuses(broker):
-    """Checks Alpaca for updates on orders we think are still 'NEW'."""
     try:
         pending = get_unfilled_executions()
         if not pending: return
@@ -41,7 +39,7 @@ def sync_order_statuses(broker):
             try:
                 alpaca_order = broker.client.get_order_by_id(oid)
                 if alpaca_order.status == 'filled':
-                    update_trade_fill(oid, float(alpaca_order.filled_avg_price), alpaca_order.filled_at, 'FILLED')
+                    update_trade_fill(oid, float(alpaca_order.filled_avg_price), str(alpaca_order.filled_at), 'FILLED')
                     print(f"🔄 Synced Fill: {oid}")
                 elif alpaca_order.status in ['canceled', 'expired', 'rejected']:
                     update_trade_fill(oid, 0.0, str(datetime.utcnow()), alpaca_order.status.upper())

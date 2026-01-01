@@ -1,9 +1,9 @@
 import os
 import sqlite3
 import urllib3
-import time  # <--- CRITICAL IMPORT
+import time
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, 
@@ -28,15 +28,19 @@ class Broker:
         except Exception as e:
             return False, str(e)
 
-    # --- 🟢 NEW: Live Ping (Request -> Reply) ---
     def ping(self):
-        """Measures the Round-Trip time for a simple API call."""
+        """Measures Live Latency"""
         try:
-            t0 = time.time()            # Start Timer
-            self.client.get_clock()     # Send Request -> Wait for Reply
-            return (time.time() - t0) * 1000 # Stop Timer
-        except:
-            return -1.0
+            t0 = time.time()
+            self.client.get_clock()
+            return (time.time() - t0) * 1000
+        except: return -1.0
+
+    def get_latest_price(self, symbol):
+        # Simplistic price fetcher using trade snapshot would be better, 
+        # but for now we rely on yfinance in main loop or position.
+        # This is a placeholder to prevent crashes.
+        return 0.0 
 
     def get_market_clock(self):
         try:
@@ -74,11 +78,7 @@ class Broker:
     def get_mean_latency_24h(self):
         try:
             with sqlite3.connect(DB_PATH) as conn:
-                query = """
-                    SELECT AVG(api_latency_ms) FROM trade_execution 
-                    WHERE submitted_at >= datetime('now', '-24 hours')
-                """
-                res = conn.execute(query).fetchone()
+                res = conn.execute("SELECT AVG(api_latency_ms) FROM trade_execution WHERE submitted_at >= datetime('now', '-24 hours')").fetchone()
                 return res[0] if res[0] else 0.0
         except: return 0.0
 
@@ -101,25 +101,19 @@ class Broker:
             req = GetOrdersRequest(status=QueryOrderStatus.ALL, symbols=[symbol], limit=50)
             all_orders = self.client.get_orders(req)
             active_orders = []
-            terminal_states = [OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED]
             for o in all_orders:
-                if o.status not in terminal_states:
+                if o.status not in [OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED]:
                     active_orders.append(o)
             return active_orders
-        except Exception as e: 
-            print(f"Order fetch error: {e}")
-            return []
+        except: return []
 
     def submit_order_v2(self, order_type, **kwargs):
-        """Submits order and measures REAL execution latency."""
         try:
             kwargs['side'] = OrderSide.BUY if kwargs['side'].lower() == 'buy' else OrderSide.SELL
             kwargs['time_in_force'] = TimeInForce.GTC if kwargs['time_in_force'].lower() == 'gtc' else TimeInForce.DAY
-            
             if order_type == "market": req = MarketOrderRequest(**kwargs)
             elif order_type == "limit": req = LimitOrderRequest(**kwargs)
             
-            # 🟢 MEASURE LATENCY (Request -> Reply)
             t0 = time.time()
             order = self.client.submit_order(req)
             latency_ms = (time.time() - t0) * 1000

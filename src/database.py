@@ -6,7 +6,6 @@ from datetime import datetime
 DB_PATH = os.getenv("DB_PATH", "data/trading.db")
 
 def init_db():
-    """Initializes the database and ensures all tables exist."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS strategies (symbol TEXT PRIMARY KEY, params TEXT, is_active INTEGER)")
@@ -70,29 +69,45 @@ def log_trade_attempt(order_id, symbol, side, qty, type, snapshot_px, latency_ms
         """, (str(order_id), symbol, side, float(qty), type, float(snapshot_px), 
               datetime.utcnow().isoformat(), float(latency_ms)))
 
-def update_trade_fill(order_id, fill_px, filled_at):
+# --- CRITICAL FIX: Missing functions added below ---
+
+def get_unfilled_executions():
+    """Returns list of order_ids that are still in NEW status."""
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute("SELECT order_id FROM trade_execution WHERE status='NEW'").fetchall()
+
+def update_trade_fill(order_id, fill_px, filled_at, status='FILLED'):
+    """Updates the execution record when an order is filled or canceled."""
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("SELECT snapshot_price, side, submitted_at FROM trade_execution WHERE order_id=?", (order_id,)).fetchone()
         if row:
             snap_px, side, sub_at_str = row
             slip_pct = 0.0
-            if snap_px and fill_px:
+            
+            if status == 'FILLED' and snap_px and fill_px:
                 diff = fill_px - snap_px
                 slip_pct = (diff / snap_px) * 100
                 if side == 'sell': slip_pct *= -1
             
             fill_ms = 0.0
-            try:
-                t_sub = datetime.fromisoformat(sub_at_str)
-                t_fill = datetime.fromisoformat(filled_at.replace("Z", "+00:00"))
-                if t_sub.tzinfo is None:
-                    from datetime import timezone
-                    t_sub = t_sub.replace(tzinfo=timezone.utc)
-                fill_ms = (t_fill - t_sub).total_seconds() * 1000
-            except: pass
+            if filled_at:
+                try:
+                    t_sub = datetime.fromisoformat(sub_at_str)
+                    # Handle Alpaca datetime vs string
+                    if isinstance(filled_at, str):
+                        t_fill = datetime.fromisoformat(filled_at.replace("Z", "+00:00"))
+                    else:
+                        t_fill = filled_at
+                    
+                    if t_sub.tzinfo is None:
+                        from datetime import timezone
+                        t_sub = t_sub.replace(tzinfo=timezone.utc)
+                    
+                    fill_ms = (t_fill - t_sub).total_seconds() * 1000
+                except: pass
 
             conn.execute("""
                 UPDATE trade_execution 
-                SET fill_price=?, filled_at=?, slippage_pct=?, fill_latency_ms=?, status='FILLED'
+                SET fill_price=?, filled_at=?, slippage_pct=?, fill_latency_ms=?, status=?
                 WHERE order_id=?
-            """, (float(fill_px), str(filled_at), float(slip_pct), float(fill_ms), order_id))
+            """, (float(fill_px) if fill_px else 0.0, str(filled_at), float(slip_pct), float(fill_ms), status, order_id))
