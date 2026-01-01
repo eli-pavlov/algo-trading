@@ -7,14 +7,13 @@ from datetime import datetime
 from src.broker import Broker
 from src.config import Config
 from src.database import get_status, update_status, get_strategies, DB_PATH
-from src.notifications import send_trade_notification  # Import Notification logic here
+from src.notifications import send_trade_notification 
 
 st.set_page_config(page_title="Algo Command Center", layout="wide")
 
-# --- COMPRESSED CSS ---
+# --- CSS (Removed the padding-top hack that was hiding the clock) ---
 st.markdown("""
 <style>
-    .stMainBlockContainer { padding-top: 1rem !important; padding-bottom: 1rem !important; }
     [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
     .stMetric { padding: 2px !important; }
     [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
@@ -31,9 +30,28 @@ st.markdown("""
 
 # Initialize Broker
 broker = Broker()
-conn_ok, conn_msg = broker.test_connection()
 
-# --- SIDEBAR ---
+# --- 1. MARKET CLOCK (Rendered First for Visibility) ---
+# We verify connection implicitly here. If this fails, the UI shows why.
+clock_status = broker.get_market_clock()
+
+# Use a column layout to force it to occupy space
+mc_col1, mc_col2 = st.columns([3, 1])
+with mc_col1:
+    if "Closed" in clock_status:
+        st.error(f"**{clock_status}**", icon="🔴")
+    elif "Open" in clock_status:
+        st.success(f"**{clock_status}**", icon="🟢")
+    else:
+        st.warning(f"**{clock_status}**", icon="🟠")
+
+with mc_col2:
+    # Quick reload button for manual refreshing
+    if st.button("🔄 Refresh", key="top_refresh"):
+        st.rerun()
+
+# --- 2. SIDEBAR ---
+conn_ok, conn_msg = broker.test_connection()
 with st.sidebar:
     st.markdown(f"**MODE: {Config.MODE}**")
     if conn_ok:
@@ -52,22 +70,14 @@ with st.sidebar:
                 st.area_chart(pd.DataFrame({"Equity": clean_equity}), height=100, color="#29b5e8")
         except: st.caption("Graph unavailable")
     else:
-        st.error("🔴 DISCONNECTED")
+        st.error(f"🔴 DISCONNECTED: {conn_msg}")
 
     st.divider()
     eng = get_status("engine_running") == "1"
     if st.button("🛑 STOP" if eng else "🚀 START", use_container_width=True):
         update_status("engine_running", "0" if eng else "1"); st.rerun()
 
-# --- MAIN HEADER (MARKET CLOCK) ---
-# FIX 1: Explicitly call get_market_clock() here in the main layout
-clock_status = broker.get_market_clock()
-if "Closed" in clock_status:
-    st.error(f"**{clock_status}**")
-else:
-    st.success(f"**{clock_status}**")
-
-# --- TABS ---
+# --- 3. TABS ---
 t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution", "🔍 Debug"])
 
 with t1: # ASSETS
@@ -163,19 +173,15 @@ with t3: # MANUAL TICKET
         tp = b1.number_input("Take Profit $", 0.0); sl = b2.number_input("Stop Loss $", 0.0)
         
         if st.form_submit_button("🚀 Submit Order", use_container_width=True):
-            # FIX 2 & 3: Submit -> Notify -> Sleep -> Rerun
             ok, res = broker.submit_order_v2(mtype, symbol=msym, qty=mqty, side=mside, limit_price=lpx if lpx>0 else None, time_in_force=tif)
             
             if ok: 
                 st.success(f"Sent: {res}")
-                # Trigger Notification immediately
                 try:
                     send_trade_notification()
                     st.toast("Slack Notification Sent!", icon="🔔")
                 except Exception as e:
                     st.warning(f"Order sent, but notification failed: {e}")
-                
-                # Wait a moment for Alpaca to register the order/fill
                 time.sleep(1.5)
                 st.rerun()
             else: 
