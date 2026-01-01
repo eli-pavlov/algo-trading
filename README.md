@@ -1,2 +1,2 @@
 ﻿# algo-trading
-Algorithmic Trading Bot Monorepo
+Algorithmic Trading Bot Monorepo.
