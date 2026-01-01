@@ -11,7 +11,7 @@ from src.notifications import send_trade_notification
 
 st.set_page_config(page_title="Algo Command Center", layout="wide")
 
-# --- CSS (Removed the padding-top hack that was hiding the clock) ---
+# --- CSS ---
 st.markdown("""
 <style>
     [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
@@ -31,29 +31,15 @@ st.markdown("""
 # Initialize Broker
 broker = Broker()
 
-# --- 1. MARKET CLOCK (Rendered First for Visibility) ---
-# We verify connection implicitly here. If this fails, the UI shows why.
-clock_status = broker.get_market_clock()
-
-# Use a column layout to force it to occupy space
-mc_col1, mc_col2 = st.columns([3, 1])
-with mc_col1:
-    if "Closed" in clock_status:
-        st.error(f"**{clock_status}**", icon="🔴")
-    elif "Open" in clock_status:
-        st.success(f"**{clock_status}**", icon="🟢")
-    else:
-        st.warning(f"**{clock_status}**", icon="🟠")
-
-with mc_col2:
-    # Quick reload button for manual refreshing
-    if st.button("🔄 Refresh", key="top_refresh"):
-        st.rerun()
-
-# --- 2. SIDEBAR ---
+# --- 1. SIDEBAR & AUTO-REFRESH ---
 conn_ok, conn_msg = broker.test_connection()
 with st.sidebar:
     st.markdown(f"**MODE: {Config.MODE}**")
+    
+    # 🔄 AUTO-REFRESH TOGGLE
+    # This creates a loop effect. If checked, the script waits 30s then reruns.
+    auto_refresh = st.checkbox("🔄 Live Updates (30s)", value=True)
+    
     if conn_ok:
         st.success("🟢 API ONLINE")
         acc = broker.get_account_stats()
@@ -76,6 +62,16 @@ with st.sidebar:
     eng = get_status("engine_running") == "1"
     if st.button("🛑 STOP" if eng else "🚀 START", use_container_width=True):
         update_status("engine_running", "0" if eng else "1"); st.rerun()
+
+# --- 2. MARKET CLOCK ---
+clock_status = broker.get_market_clock()
+mc_col1, mc_col2 = st.columns([3, 1])
+with mc_col1:
+    if "Closed" in clock_status: st.error(f"**{clock_status}**", icon="🔴")
+    elif "Open" in clock_status: st.success(f"**{clock_status}**", icon="🟢")
+    else: st.warning(f"**{clock_status}**", icon="🟠")
+with mc_col2:
+    if st.button("🔄 Refresh", key="top_refresh"): st.rerun()
 
 # --- 3. TABS ---
 t1, t2, t3, t4, t5 = st.tabs(["📊 Assets", "⚙️ Strategies", "🕹️ Manual", "📉 Execution", "🔍 Debug"])
@@ -174,7 +170,6 @@ with t3: # MANUAL TICKET
         
         if st.form_submit_button("🚀 Submit Order", use_container_width=True):
             ok, res = broker.submit_order_v2(mtype, symbol=msym, qty=mqty, side=mside, limit_price=lpx if lpx>0 else None, time_in_force=tif)
-            
             if ok: 
                 st.success(f"Sent: {res}")
                 try:
@@ -184,8 +179,7 @@ with t3: # MANUAL TICKET
                     st.warning(f"Order sent, but notification failed: {e}")
                 time.sleep(1.5)
                 st.rerun()
-            else: 
-                st.error(res)
+            else: st.error(res)
 
 with t4: # EXECUTION
     st.subheader("⚡ Persistent History")
@@ -212,3 +206,8 @@ with t5: # DEBUG
         <b>In-Use Key:</b> {act_key[:4]}...{act_key[-4:]}<br>
         <b>Target Endpoint:</b> {"Paper Simulator" if is_paper else "Live Exchange"}
     </div>""", unsafe_allow_html=True)
+
+# --- AUTO REFRESH LOGIC ---
+if auto_refresh:
+    time.sleep(30)
+    st.rerun()
