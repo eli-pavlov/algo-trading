@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import urllib3
-import time  # <--- Make sure this is imported
+import time  # <--- CRITICAL IMPORT
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from alpaca.trading.client import TradingClient
@@ -28,13 +28,13 @@ class Broker:
         except Exception as e:
             return False, str(e)
 
-    # --- NEW: LIVE PING FUNCTION ---
+    # --- 🟢 NEW: Live Ping (Request -> Reply) ---
     def ping(self):
-        """Measures real-time round-trip latency to Alpaca API."""
+        """Measures the Round-Trip time for a simple API call."""
         try:
-            t0 = time.time()
-            self.client.get_clock() # Lightweight call
-            return (time.time() - t0) * 1000
+            t0 = time.time()            # Start Timer
+            self.client.get_clock()     # Send Request -> Wait for Reply
+            return (time.time() - t0) * 1000 # Stop Timer
         except:
             return -1.0
 
@@ -72,7 +72,6 @@ class Broker:
         return data
 
     def get_mean_latency_24h(self):
-        """Still useful for historical analysis, but not for the live dashboard."""
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 query = """
@@ -112,6 +111,7 @@ class Broker:
             return []
 
     def submit_order_v2(self, order_type, **kwargs):
+        """Submits order and measures REAL execution latency."""
         try:
             kwargs['side'] = OrderSide.BUY if kwargs['side'].lower() == 'buy' else OrderSide.SELL
             kwargs['time_in_force'] = TimeInForce.GTC if kwargs['time_in_force'].lower() == 'gtc' else TimeInForce.DAY
@@ -119,6 +119,7 @@ class Broker:
             if order_type == "market": req = MarketOrderRequest(**kwargs)
             elif order_type == "limit": req = LimitOrderRequest(**kwargs)
             
+            # 🟢 MEASURE LATENCY (Request -> Reply)
             t0 = time.time()
             order = self.client.submit_order(req)
             latency_ms = (time.time() - t0) * 1000
