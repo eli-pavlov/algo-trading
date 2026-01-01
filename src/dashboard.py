@@ -7,8 +7,7 @@ from datetime import datetime
 from src.broker import Broker
 from src.config import Config
 from src.database import get_status, update_status, get_strategies, DB_PATH
-# 1️⃣ NEW IMPORT: Bring in the notification logic
-from src.notifications import send_trade_notification 
+from src.notifications import send_trade_notification  # Import Notification logic here
 
 st.set_page_config(page_title="Algo Command Center", layout="wide")
 
@@ -61,7 +60,7 @@ with st.sidebar:
         update_status("engine_running", "0" if eng else "1"); st.rerun()
 
 # --- MAIN HEADER (MARKET CLOCK) ---
-# Fixed: Explicitly calling this here ensures it renders at the top
+# FIX 1: Explicitly call get_market_clock() here in the main layout
 clock_status = broker.get_market_clock()
 if "Closed" in clock_status:
     st.error(f"**{clock_status}**")
@@ -164,22 +163,21 @@ with t3: # MANUAL TICKET
         tp = b1.number_input("Take Profit $", 0.0); sl = b2.number_input("Stop Loss $", 0.0)
         
         if st.form_submit_button("🚀 Submit Order", use_container_width=True):
-            # 2️⃣ Submit order via Broker
+            # FIX 2 & 3: Submit -> Notify -> Sleep -> Rerun
             ok, res = broker.submit_order_v2(mtype, symbol=msym, qty=mqty, side=mside, limit_price=lpx if lpx>0 else None, time_in_force=tif)
             
             if ok: 
                 st.success(f"Sent: {res}")
-                
-                # 3️⃣ TRIGGER SLACK NOTIFICATION
+                # Trigger Notification immediately
                 try:
                     send_trade_notification()
                     st.toast("Slack Notification Sent!", icon="🔔")
                 except Exception as e:
-                    st.error(f"Notification Failed: {e}")
+                    st.warning(f"Order sent, but notification failed: {e}")
                 
-                # 4️⃣ WAIT & RELOAD (Update Asset Tab)
-                time.sleep(1.5) # Allow Alpaca 1.5s to process the order
-                st.rerun()      # Force refresh of the UI
+                # Wait a moment for Alpaca to register the order/fill
+                time.sleep(1.5)
+                st.rerun()
             else: 
                 st.error(res)
 
